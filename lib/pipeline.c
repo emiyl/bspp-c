@@ -1,6 +1,7 @@
 #include "native.h"
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -282,6 +283,21 @@ static void clut_files(const Options *o,const Groups *groups) {
     }
     output(o,"CLUT4.BIN",&four); output(o,"CLUT8.BIN",&eight);
 }
+static void file_write_u8(FILE *file, unsigned value) {
+    uint8_t byte=(uint8_t)value;
+    if (fwrite(&byte,1,1,file)!=1) fail("cannot write output byte");
+}
+static void file_write_u16(FILE *file, uint64_t value, bool big) {
+    uint8_t bytes[2] = { (uint8_t)(value >> (big ? 8 : 0)), (uint8_t)(value >> (big ? 0 : 8)) };
+    if (fwrite(bytes,1,2,file)!=2) fail("cannot write output u16");
+}
+static void file_write_u32(FILE *file, uint64_t value, bool big) {
+    for (unsigned i=0;i<4;++i)
+        file_write_u8(file,(unsigned)(value >> ((big ? 3-i : i) * 8)) & 255);
+}
+static void file_write_bytes(FILE *file, const void *data, size_t size) {
+    if (size && fwrite(data,1,size,file)!=size) fail("cannot write output bytes");
+}
 static Buffer rle(const Buffer *in) {
     Buffer out={0};
     for (size_t i=0;i<in->size;) {
@@ -328,6 +344,15 @@ static void metadata_entry(Buffer *out,const Asset *a,const ClutImage *image,
     put16(out,a ? a->crop_w:0,false); put16(out,a ? a->crop_h:0,false);
     put16(out,image ? group_row(groups,image->group):0,false);
 }
+static void metadata_entry_file(FILE *out,const Asset *a,const ClutImage *image,
+                               Location location,const Groups *groups) {
+    file_write_u16(out,location.atlas<0 ? 65535:(unsigned)location.atlas,false);
+    file_write_u16(out,location.x,false); file_write_u16(out,location.y,false);
+    file_write_u16(out,image ? image->width:0,false); file_write_u16(out,image ? image->height:0,false);
+    file_write_u16(out,a ? a->crop_x:0,false); file_write_u16(out,a ? a->crop_y:0,false);
+    file_write_u16(out,a ? a->crop_w:0,false); file_write_u16(out,a ? a->crop_h:0,false);
+    file_write_u16(out,image ? group_row(groups,image->group):0,false);
+}
 static void ps2(const Options *o,const DataWin *dw,Image *pages) {
     pcre2_code **patterns=allocate(o->pattern_count,sizeof *patterns);
     for (size_t i=0;i<o->pattern_count;++i) {
@@ -366,9 +391,15 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
     Groups groups=merge_cluts(images,assets.count);
     Atlases atlases=pack_atlases(images,keys,assets.count,o->atlas_size);
     clut_files(o,&groups);
-    Buffer textures={0},metadata={0};
-    put8(&metadata,0); put16(&metadata,dw->tpag_count,false);
-    put16(&metadata,dw->tile_count,false); put16(&metadata,atlases.count,false);
+    char *textures_path=join_path(o->output,"TEXTURES.BIN");
+    FILE *textures_file=fopen(textures_path,"wb");
+    if (!textures_file) fail("cannot create '%s': %s",textures_path,strerror(errno));
+    char *metadata_path=join_path(o->output,"ATLAS.BIN");
+    FILE *metadata_file=fopen(metadata_path,"wb");
+    if (!metadata_file) fail("cannot create '%s': %s",metadata_path,strerror(errno));
+    file_write_u8(metadata_file,0); file_write_u16(metadata_file,dw->tpag_count,false);
+    file_write_u16(metadata_file,dw->tile_count,false); file_write_u16(metadata_file,atlases.count,false);
+    size_t textures_size=0;
     for (size_t i=0;i<atlases.count;++i) {
         const Atlas *a=&atlases.items[i];
         size_t area=(size_t)a->width*a->height;
@@ -387,29 +418,50 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
         Buffer compressed=rle(&pixels);
         bool use=compressed.size<pixels.size;
         Buffer *payload=use ? &compressed:&pixels;
-        put32(&metadata,textures.size,false); put16(&metadata,a->width,false); put16(&metadata,a->height,false);
-        put8(&metadata,a->bpp); put32(&metadata,payload->size,false); put8(&metadata,use ? 1:0);
-        append(&textures,payload->data,payload->size);
+        file_write_u32(metadata_file,textures_size,false); file_write_u16(metadata_file,a->width,false); file_write_u16(metadata_file,a->height,false);
+        file_write_u8(metadata_file,a->bpp); file_write_u32(metadata_file,payload->size,false); file_write_u8(metadata_file,use ? 1:0);
+        file_write_bytes(textures_file,payload->data,payload->size);
+        textures_size += payload->size;
         free(pixels.data); free(compressed.data);
         debug_atlas(o,a,images);
     }
     for (size_t i=0;i<dw->tpag_count;++i) {
         size_t found=SIZE_MAX;
         for (size_t j=0;j<assets.count;++j) if (assets.items[j].tpag==(int)i) found=j;
-        if (found==SIZE_MAX) metadata_entry(&metadata,NULL,NULL,(Location){-1,0,0},&groups);
-        else metadata_entry(&metadata,&assets.items[found],&images[found],locations[found],&groups);
+        if (found==SIZE_MAX) {
+            file_write_u16(metadata_file,65535,false); file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false);
+            file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false);
+            file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false);
+            file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false);
+        } else {
+            metadata_entry_file(metadata_file,&assets.items[found],&images[found],locations[found],&groups);
+        }
     }
     for (size_t i=0;i<dw->tile_count;++i) {
         const Tile *t=&dw->tiles[i]; char *name=tile_name(dw,t,false);
         size_t found=SIZE_MAX;
         for (size_t j=0;j<assets.count;++j) if (!strcmp(name,assets.items[j].name)) found=j;
         free(name);
-        put16(&metadata,t->definition,false); put16(&metadata,t->x,false); put16(&metadata,t->y,false);
-        put16(&metadata,t->width,false); put16(&metadata,t->height,false);
-        if (found==SIZE_MAX) metadata_entry(&metadata,NULL,NULL,(Location){-1,0,0},&groups);
-        else metadata_entry(&metadata,&assets.items[found],&images[found],locations[found],&groups);
+        file_write_u16(metadata_file,t->definition,false); file_write_u16(metadata_file,t->x,false); file_write_u16(metadata_file,t->y,false);
+        file_write_u16(metadata_file,t->width,false); file_write_u16(metadata_file,t->height,false);
+        if (found==SIZE_MAX) {
+            file_write_u16(metadata_file,65535,false); file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false);
+            file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false);
+            file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false);
+            file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false); file_write_u16(metadata_file,0,false);
+        } else {
+            metadata_entry_file(metadata_file,&assets.items[found],&images[found],locations[found],&groups);
+        }
     }
-    output(o,"TEXTURES.BIN",&textures); output(o,"ATLAS.BIN",&metadata);
+    long metadata_size = ftell(metadata_file);
+    if (metadata_size < 0) fail("cannot tell '%s': %s",metadata_path,strerror(errno));
+    if (fclose(textures_file)) fail("cannot close '%s': %s",textures_path,strerror(errno));
+    if (fclose(metadata_file)) fail("cannot close '%s': %s",metadata_path,strerror(errno));
+    if (bspp_verbose) {
+        printf("Wrote %zu bytes to %s\n",textures_size,textures_path);
+        printf("Wrote %zu bytes to %s\n",(size_t)metadata_size,metadata_path);
+    }
+    free(textures_path); free(metadata_path);
     char *directory=copy_string(o->input),*slash=strrchr(directory,'/');
     if (slash) { if (slash==directory) slash[1]='\0'; else *slash='\0'; }
     else { free(directory); directory=copy_string("."); }
