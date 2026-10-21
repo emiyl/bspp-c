@@ -7,6 +7,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 find_package(PNG REQUIRED)
 find_package(BZip2 REQUIRED)
+find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PCRE2 REQUIRED IMPORTED_TARGET libpcre2-8)
 

@@ -13,6 +13,7 @@ static void help(void) {
          "  --atlas-size=<pixels>   Square atlas dimensions (default: 512; PS2)\n"
          "  --force-4bpp=<regex>    Full internal image-name PCRE2 match; repeatable (PS2)\n"
          "  --debug-output=<path>   Extract debug PNGs (PS2)\n"
+         "  --parallel=(true|false) Process images and audio concurrently (default: true; PS2)\n"
          "  -v, --verbose           Show processing progress and output paths\n"
          "  -h, --help              Show help\n"
          "\nImage names include spr/, bg/, font/, or tile/ prefixes.");
@@ -42,7 +43,8 @@ int main(int argc, char **argv) {
             bool atlas = n == 12 && !strncmp(arg, "--atlas-size", n);
             bool pattern = n == 12 && !strncmp(arg, "--force-4bpp", n);
             bool debug = n == 14 && !strncmp(arg, "--debug-output", n);
-            if (!output && !target && !atlas && !pattern && !debug) fail("unknown option '%s'", arg);
+            bool parallel = n == 10 && !strncmp(arg, "--parallel", n);
+            if (!output && !target && !atlas && !pattern && !debug && !parallel) fail("unknown option '%s'", arg);
             if (attached_output) value=arg+2;
             if (!value) {
                 if (++i >= argc) fail("missing value for '%s'", arg);
@@ -50,6 +52,10 @@ int main(int argc, char **argv) {
             }
             if (output) o.output = value;
             else if (debug) o.debug = value;
+            else if (parallel) {
+                if (strcmp(value,"true") && strcmp(value,"false")) fail("parallel must be true or false");
+                o.no_parallel = !strcmp(value,"false");
+            }
             else if (target) {
                 if (strcmp(value, "ps2") && strcmp(value, "ps3")) fail("target must be ps2 or ps3");
                 o.ps3 = !strcmp(value, "ps3");

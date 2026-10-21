@@ -12,6 +12,7 @@ typedef struct {
     int atlas_size;
     char **patterns;
     size_t pattern_count;
+    bool no_parallel;
 } Options;
 
 void process(const Options *options);

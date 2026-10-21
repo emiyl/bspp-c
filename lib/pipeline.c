@@ -2,6 +2,7 @@
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -525,6 +526,8 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
         free(assets.items[i].name); free(assets.items[i].key); free_image(&assets.items[i].image); free_clut(&images[i]);
     }
     free(assets.items); free(images); free(keys); free(locations); free(groups.items); free_atlases(&atlases);
+}
+static void audio_files(const Options *o,const DataWin *dw) {
     char *directory=copy_string(o->input),*slash=strrchr(directory,'/');
     if (slash) { if (slash==directory) slash[1]='\0'; else *slash='\0'; }
     else { free(directory); directory=copy_string("."); }
@@ -539,6 +542,12 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
     output(o,"SOUNDBNK.BIN",&bank);
     if (bspp_verbose) printf("Wrote %zu bytes to %s\n",(size_t)sounds_size,sounds_path);
     free(sounds_path); free(directory);
+}
+typedef struct { const Options *options; const DataWin *dw; } AudioTask;
+static void *audio_worker(void *context) {
+    const AudioTask *task=context;
+    audio_files(task->options,task->dw);
+    return NULL;
 }
 static void ps3(const Options *o,const DataWin *dw,Image *pages) {
     FILE *storage=tmpfile();
@@ -621,8 +630,22 @@ void process(const Options *o) {
     DataWin dw=load_datawin(o->input,false,o->ps3);
     mkdirs(o->output);
     Image *pages=allocate(dw.texture_count,sizeof *pages);
+    bool parallel=!o->ps3 && !o->no_parallel;
+    pthread_t audio_thread;
+    AudioTask audio_task={o,&dw};
+    if (parallel) {
+        int error=pthread_create(&audio_thread,NULL,audio_worker,&audio_task);
+        if (error) fail("cannot start audio worker: %s",strerror(error));
+    }
     if (o->ps3) ps3(o,&dw,pages);
-    else ps2(o,&dw,pages);
+    else {
+        ps2(o,&dw,pages);
+        if (!parallel) audio_files(o,&dw);
+    }
+    if (parallel) {
+        int error=pthread_join(audio_thread,NULL);
+        if (error) fail("cannot join audio worker: %s",strerror(error));
+    }
     for (size_t i=0;i<dw.texture_count;++i) free_image(&pages[i]);
     free(pages); free_datawin(&dw);
     if (bspp_verbose) puts("Done!");
