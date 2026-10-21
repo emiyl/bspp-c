@@ -281,7 +281,6 @@ static void debug_atlas(const Options *o,const Atlas *a,const ClutImage *images)
 static void free_decoded_pages(Image **pages, size_t count) {
     if (!pages || !*pages) return;
     for (size_t i=0;i<count;++i) free_image(&(*pages)[i]);
-    free(*pages); *pages=NULL;
 }
 static void metadata_entry(Buffer *out,const Asset *a,const ClutImage *image,
                            Location location,const Groups *groups) {
