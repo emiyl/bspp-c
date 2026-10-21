@@ -294,6 +294,7 @@ static void ps2(const Options *o,const DataWin *dw,const Image *pages) {
             else if (rc!=PCRE2_ERROR_NOMATCH) fail("regex matching failed (%d) for '%s'",rc,assets.items[i].name);
         }
         images[i]=make_clut(assets.items[i].name,&assets.items[i].image,force);
+        free_image(&assets.items[i].image);
         keys[i]=assets.items[i].key;
         locations[i].atlas=-1;
     }
