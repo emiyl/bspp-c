@@ -353,15 +353,6 @@ static size_t write_rle(FILE *out,const uint8_t *data,size_t size) {
     }
     return written;
 }
-static Buffer rle(const Buffer *in) {
-    Buffer out={0};
-    for (size_t i=0;i<in->size;) {
-        size_t n=1;
-        while (n<255 && n<in->size-i && in->data[i+n]==in->data[i]) ++n;
-        put8(&out,(unsigned)n); put8(&out,in->data[i]); i+=n;
-    }
-    return out;
-}
 static void debug_atlas(const Options *o,const Atlas *a,const ClutImage *images) {
     if (!o->debug) return;
     const uint32_t colors[]={0xffff0000,0xff00ff00,0xff0000ff,0xffffff00,0xff00ffff,0xffff00ff,0xffffc800};
@@ -389,15 +380,6 @@ static void debug_atlas(const Options *o,const Atlas *a,const ClutImage *images)
 static void free_decoded_pages(Image **pages, size_t count) {
     if (!pages || !*pages) return;
     for (size_t i=0;i<count;++i) free_image(&(*pages)[i]);
-}
-static void metadata_entry(Buffer *out,const Asset *a,const ClutImage *image,
-                           Location location,const Groups *groups) {
-    put16(out,location.atlas<0 ? 65535:(unsigned)location.atlas,false);
-    put16(out,location.x,false); put16(out,location.y,false);
-    put16(out,image ? image->width:0,false); put16(out,image ? image->height:0,false);
-    put16(out,a ? a->crop_x:0,false); put16(out,a ? a->crop_y:0,false);
-    put16(out,a ? a->crop_w:0,false); put16(out,a ? a->crop_h:0,false);
-    put16(out,image ? group_row(groups,image->group):0,false);
 }
 static void metadata_entry_file(FILE *out,const Asset *a,const ClutImage *image,
                                Location location,const Groups *groups) {

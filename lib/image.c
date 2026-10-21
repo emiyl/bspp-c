@@ -316,24 +316,6 @@ typedef struct {
     unsigned shift;
 } ColorBox;
 
-static ColorBox color_box(const uint32_t *pixels, size_t offset, size_t count) {
-    unsigned minimum[4] = {255, 255, 255, 255}, maximum[4] = {0};
-    const unsigned shifts[4] = {16, 8, 0, 24};
-    for (size_t i = 0; i < count; ++i) {
-        for (int c = 0; c < 4; ++c) {
-            unsigned value = (pixels[offset + i] >> shifts[c]) & 255;
-            if (minimum[c] > value) minimum[c] = value;
-            if (maximum[c] < value) maximum[c] = value;
-        }
-    }
-    ColorBox box = {offset, count, 0, 16};
-    for (int c = 0; c < 4; ++c) {
-        unsigned range = maximum[c] - minimum[c];
-        if (range > box.range) { box.range = range; box.shift = shifts[c]; }
-    }
-    return box;
-}
-
 static int quant_box_sort_channel = 0;
 
 static int quant_box_compare(const void *a, const void *b) {
@@ -587,12 +569,6 @@ static void remap_clut(ClutImage *image, const ClutGroup *group) {
     memcpy(image->palette, group->palette, sizeof(image->palette));
     image->used = group->used;
     image->group = group->id;
-}
-
-static int compare_group_id(const void *a, const void *b) {
-    const ClutGroup *ga = (const ClutGroup *)a;
-    const ClutGroup *gb = (const ClutGroup *)b;
-    return (ga->id > gb->id) - (ga->id < gb->id);
 }
 
 Groups merge_cluts(ClutImage *images, size_t count) {
