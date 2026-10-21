@@ -427,6 +427,7 @@ static int32_t kotlin_int(float value) {
 
 void process_audio(const DataWin *dw, const char *input_directory,
                    Buffer *sound_bank, Buffer *sounds) {
+    if (bspp_verbose) fprintf(stderr, "Audio: processing from directory %s\n", input_directory);
     if (sound_bank->size || sounds->size) fail("Audio output buffers must initially be empty");
     count16(dw->audio_count, "embedded AUDO entries");
     count16(dw->sound_count, "SOND entries");
