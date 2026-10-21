@@ -23,6 +23,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache Linux dependencies
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt/archives
+            /var/lib/apt/lists
+          key: ${{ runner.os }}-${{ runner.arch }}-apt-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-apt-
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         shell: bash
@@ -36,6 +47,17 @@ jobs:
             libbz2-dev \
             libvorbis-dev \
             libpcre2-dev
+
+      - name: Cache macOS dependencies
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/Library/Homebrew
+          key: ${{ runner.os }}-${{ runner.arch }}-brew-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-brew-
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
