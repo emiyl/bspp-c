@@ -298,6 +298,29 @@ static void file_write_u32(FILE *file, uint64_t value, bool big) {
 static void file_write_bytes(FILE *file, const void *data, size_t size) {
     if (size && fwrite(data,1,size,file)!=size) fail("cannot write output bytes");
 }
+static size_t rle_size(const uint8_t *data,size_t size) {
+    size_t out=0;
+    for (size_t i=0;i<size;) {
+        size_t n=1;
+        while (n<255 && i+n<size && data[i+n]==data[i]) ++n;
+        out += 2;
+        i += n;
+    }
+    return out;
+}
+static size_t write_rle(FILE *out,const uint8_t *data,size_t size) {
+    size_t written=0;
+    for (size_t i=0;i<size;) {
+        size_t n=1;
+        while (n<255 && i+n<size && data[i+n]==data[i]) ++n;
+        uint8_t count=(uint8_t)n;
+        if (fwrite(&count,1,1,out)!=1) fail("cannot write output run-length byte");
+        if (fwrite(data+i,1,1,out)!=1) fail("cannot write output run-length value");
+        written += 2;
+        i += n;
+    }
+    return written;
+}
 static Buffer rle(const Buffer *in) {
     Buffer out={0};
     for (size_t i=0;i<in->size;) {
@@ -415,14 +438,18 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
             for (size_t j=0;j<area;j+=2) put8(&pixels,canvas[j]|(j+1<area ? canvas[j+1]<<4:0));
         } else append(&pixels,canvas,area);
         free(canvas);
-        Buffer compressed=rle(&pixels);
-        bool use=compressed.size<pixels.size;
-        Buffer *payload=use ? &compressed:&pixels;
+        size_t rle_size_value = rle_size(pixels.data,pixels.size);
+        bool use = rle_size_value < pixels.size;
+        size_t payload_size = use ? rle_size_value : pixels.size;
         file_write_u32(metadata_file,textures_size,false); file_write_u16(metadata_file,a->width,false); file_write_u16(metadata_file,a->height,false);
-        file_write_u8(metadata_file,a->bpp); file_write_u32(metadata_file,payload->size,false); file_write_u8(metadata_file,use ? 1:0);
-        file_write_bytes(textures_file,payload->data,payload->size);
-        textures_size += payload->size;
-        free(pixels.data); free(compressed.data);
+        file_write_u8(metadata_file,a->bpp); file_write_u32(metadata_file,payload_size,false); file_write_u8(metadata_file,use ? 1:0);
+        if (use) {
+            write_rle(textures_file,pixels.data,pixels.size);
+        } else {
+            file_write_bytes(textures_file,pixels.data,pixels.size);
+        }
+        textures_size += payload_size;
+        free(pixels.data);
         debug_atlas(o,a,images);
     }
     for (size_t i=0;i<dw->tpag_count;++i) {
