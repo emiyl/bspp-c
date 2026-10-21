@@ -123,7 +123,31 @@ static int clamp_int(int value, int lo, int hi) {
     return value < lo ? lo : value > hi ? hi : value;
 }
 
-static Buffer encode_adpcm(const int16_t *samples, size_t count) {
+typedef struct {
+    Audio audio;
+    unsigned channels;
+    double ratio;
+    size_t frames, encoded;
+    int predictor, index;
+    int16_t *previous;
+} PcmEncoder;
+
+static size_t pcm_chunk_frames(unsigned channels) {
+    return channels > 4096 ? 1 : 4096 / channels;
+}
+
+static PcmEncoder new_pcm_encoder(unsigned rate, unsigned channels) {
+    if (!rate || !channels || channels > UINT16_MAX)
+        fail("Invalid audio sample rate or channel count: %u Hz, %u channels", rate, channels);
+    return (PcmEncoder){
+        .audio={.valid=true,.rate=rate>22050 ? 22050:rate},
+        .channels=channels,
+        .ratio=rate>22050 ? (double)rate/22050.0:1.0,
+        .previous=allocate(channels,sizeof(int16_t))
+    };
+}
+
+static void encode_adpcm(PcmEncoder *encoder, int sample) {
     static const int steps[] = {
         7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,
         34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,
@@ -133,56 +157,62 @@ static Buffer encode_adpcm(const int16_t *samples, size_t count) {
         15289,16818,18500,20350,22385,24623,27086,29794,32767
     };
     static const int indices[] = {-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8};
-    size_t size = count / 2 + count % 2;
-    Buffer out = {allocate(size, 1), size, size};
-    int predictor = 0, index = 0;
-    for (size_t i = 0; i < count; ++i) {
-        int step = steps[index], diff = samples[i] - predictor, nibble = 0;
-        if (diff < 0) { nibble = 8; diff = -diff; }
-        if (diff >= step) { nibble |= 4; diff -= step; }
-        if (diff >= step / 2) { nibble |= 2; diff -= step / 2; }
-        if (diff >= step / 4) nibble |= 1;
-        int delta = step >> 3;
-        if (nibble & 4) delta += step;
-        if (nibble & 2) delta += step >> 1;
-        if (nibble & 1) delta += step >> 2;
-        predictor = clamp_int(predictor + ((nibble & 8) ? -delta : delta), -32768, 32767);
-        index = clamp_int(index + indices[nibble], 0, 88);
-        if (i & 1) out.data[i / 2] |= (uint8_t)(nibble << 4);
-        else out.data[i / 2] = (uint8_t)nibble;
-    }
-    return out;
+    int step = steps[encoder->index], diff = sample - encoder->predictor, nibble = 0;
+    if (diff < 0) { nibble = 8; diff = -diff; }
+    if (diff >= step) { nibble |= 4; diff -= step; }
+    if (diff >= step / 2) { nibble |= 2; diff -= step / 2; }
+    if (diff >= step / 4) nibble |= 1;
+    int delta = step >> 3;
+    if (nibble & 4) delta += step;
+    if (nibble & 2) delta += step >> 1;
+    if (nibble & 1) delta += step >> 2;
+    encoder->predictor = clamp_int(encoder->predictor + ((nibble & 8) ? -delta : delta), -32768, 32767);
+    encoder->index = clamp_int(encoder->index + indices[nibble], 0, 88);
+    Buffer *out=&encoder->audio.bytes;
+    if (encoder->encoded & 1) out->data[out->size-1] |= (uint8_t)(nibble << 4);
+    else put8(out,(unsigned)nibble);
+    ++encoder->encoded;
 }
 
-static Audio convert_pcm(int16_t *pcm, size_t sample_count, unsigned rate, unsigned channels) {
-    if (!rate || !channels || channels > UINT16_MAX)
-        fail("Invalid audio sample rate or channel count: %u Hz, %u channels", rate, channels);
-    size_t frames = sample_count / channels;
-    double ratio = rate > 22050 ? (double)rate / 22050.0 : 1.0;
-    size_t output_frames = rate > 22050 ? (size_t)(frames / ratio) : frames;
-    if (output_frames > UINT32_MAX) fail("Audio sample count exceeds 32-bit range");
-    for (size_t f = 0; f < output_frames; ++f) {
-        double position = f * ratio;
-        size_t source = rate > 22050 ? (size_t)position : f;
+static void encode_pcm(PcmEncoder *encoder, const int16_t *pcm, size_t frames, bool final) {
+    if (frames > UINT32_MAX - encoder->frames) fail("Audio sample count exceeds 32-bit range");
+    size_t base=encoder->frames,end=base+frames;
+    size_t output_frames=(size_t)(end/encoder->ratio);
+    while (!final || encoder->encoded<output_frames) {
+        double position = encoder->encoded * encoder->ratio;
+        size_t source = encoder->ratio>1.0 ? (size_t)position : encoder->encoded;
+        if (source>=end || (!final && encoder->ratio>1.0 && source+1>=end)) break;
+        if (source<base && (!base || source!=base-1)) fail("PCM resampler lost source frames");
         float fraction = (float)(position - source);
         int sum = 0;
-        for (unsigned ch = 0; ch < channels; ++ch) {
-            int first = pcm[source * channels + ch];
+        for (unsigned ch = 0; ch < encoder->channels; ++ch) {
+            int first = source<base ? encoder->previous[ch] : pcm[(source-base)*encoder->channels+ch];
             int value = first;
-            if (rate > 22050) {
-                int second = source + 1 < frames ? pcm[(source + 1) * channels + ch] : first;
+            if (encoder->ratio>1.0) {
+                int second = source+1<end ? pcm[(source+1-base)*encoder->channels+ch] : first;
                 /* Kotlin performs this interpolation in Float, then truncates. */
                 float difference = (float)(second - first) * fraction;
                 value = clamp_int((int)((float)first + difference), -32768, 32767);
             }
             sum += value;
         }
-        pcm[f] = (int16_t)(sum / (int)channels);
+        encode_adpcm(encoder,sum/(int)encoder->channels);
     }
-    Audio result = {true, rate > 22050 ? 22050 : rate, (uint32_t)output_frames, 0,
-                    encode_adpcm(pcm, output_frames)};
-    free(pcm);
-    return result;
+    if (frames) memcpy(encoder->previous,pcm+(frames-1)*encoder->channels,
+                       encoder->channels*sizeof(*pcm));
+    encoder->frames=end;
+}
+
+static Audio finish_pcm(PcmEncoder *encoder) {
+    encode_pcm(encoder,NULL,0,true);
+    size_t count=(size_t)(encoder->frames/encoder->ratio);
+    if (encoder->encoded<count) fail("PCM resampler produced too few samples");
+    /* Until EOF, one speculative sample may precede the final floor(frames / ratio) limit. */
+    encoder->audio.count=(uint32_t)count;
+    encoder->audio.bytes.size=count/2+count%2;
+    if (count&1) encoder->audio.bytes.data[encoder->audio.bytes.size-1]&=15;
+    free(encoder->previous);
+    return encoder->audio;
 }
 
 static Audio decode_wav(Slice data, const char *label) {
@@ -224,20 +254,29 @@ static Audio decode_wav(Slice data, const char *label) {
         return (Audio){0};
     }
     if (!rate || rate > INT_MAX || !channels) fail("Invalid WAV format fields: %s", label);
-    size_t count = pcm.size / (bits / 8);
-    int16_t *samples = allocate(count, sizeof(*samples));
-    for (size_t i = 0; i < count; ++i) {
-        if (bits == 16) {
-            unsigned value = u16(pcm, i * 2);
-            samples[i] = (int16_t)(value >= 32768 ? (int)value - 65536 : (int)value);
-        } else {
-            /* Preserve Kotlin's wrapping 257 multiplier, including unsigned zero. */
-            int value = ((int)pcm.data[i] - 128) * 257;
-            if (value < -32768) value += 65536;
-            samples[i] = (int16_t)value;
+    size_t frames=pcm.size/(bits/8)/channels;
+    size_t chunk_frames=pcm_chunk_frames(channels);
+    int16_t *samples=allocate(chunk_frames*channels,sizeof(*samples));
+    PcmEncoder encoder=new_pcm_encoder(rate,channels);
+    for (size_t at=0;at<frames;) {
+        size_t n=frames-at<chunk_frames ? frames-at:chunk_frames;
+        for (size_t i=0;i<n*channels;++i) {
+            size_t source=at*channels+i;
+            if (bits == 16) {
+                unsigned value = u16(pcm, source*2);
+                samples[i] = (int16_t)(value >= 32768 ? (int)value - 65536 : (int)value);
+            } else {
+                /* Preserve Kotlin's wrapping 257 multiplier, including unsigned zero. */
+                int value = ((int)pcm.data[source] - 128) * 257;
+                if (value < -32768) value += 65536;
+                samples[i] = (int16_t)value;
+            }
         }
+        encode_pcm(&encoder,samples,n,false);
+        at+=n;
     }
-    return convert_pcm(samples, count, rate, channels);
+    free(samples);
+    return finish_pcm(&encoder);
 }
 
 static bool validate_ogg(Slice data, const char *label) {
@@ -285,15 +324,17 @@ static Audio decode_ogg(Slice data, const char *label) {
         return (Audio){0};
     }
     if (total>INT_MAX/channels) fail("Vorbis sample allocation exceeds decoder limit: %s",label);
-    size_t capacity=(size_t)total*channels;
-    size_t chunk_capacity=(size_t)1024*channels;
+    size_t chunk_frames=pcm_chunk_frames(channels);
+    size_t chunk_capacity=chunk_frames*channels;
     float *samples=allocate(chunk_capacity,sizeof *samples);
-    int16_t *pcm=allocate(capacity,sizeof *pcm);
+    int16_t *pcm=allocate(chunk_capacity,sizeof *pcm);
+    PcmEncoder encoder=new_pcm_encoder(rate,channels);
     size_t count=0;
-    while (count<capacity) {
-        size_t remaining=capacity-count;
+    while (count<total) {
+        size_t remaining=total-count;
+        size_t requested=remaining<chunk_frames ? remaining:chunk_frames;
         int frames=stb_vorbis_get_samples_float_interleaved(vf,(int)channels,samples,
-                   (int)(remaining<chunk_capacity ? remaining:chunk_capacity));
+                   (int)(requested*channels));
         if (frames<=0) break;
         size_t n=(size_t)frames*channels;
         for (size_t i=0;i<n;++i) {
@@ -301,15 +342,17 @@ static Audio decode_ogg(Slice data, const char *label) {
             if (!isfinite(value)) fail("Non-finite Vorbis PCM sample: %s",label);
             if (value < -1.0f) value=-1.0f;
             if (value > 1.0f) value=1.0f;
-            pcm[count+i]=(int16_t)(int)(value*32767.0f);
+            pcm[i]=(int16_t)(int)(value*32767.0f);
         }
-        count+=n;
+        encode_pcm(&encoder,pcm,(size_t)frames,false);
+        count+=(size_t)frames;
     }
     error=stb_vorbis_get_error(vf);
     stb_vorbis_close(vf);
     if (error || !count) fail("Corrupt Vorbis sample data: %s (decoder error %d)",label,error);
     free(samples);
-    return convert_pcm(pcm,count,rate,channels);
+    free(pcm);
+    return finish_pcm(&encoder);
 }
 
 static Audio decode_audio(Slice data, const char *label) {
