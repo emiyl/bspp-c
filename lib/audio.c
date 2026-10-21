@@ -336,21 +336,40 @@ static Audio decode_ogg(Slice data, const char *label) {
         fprintf(stderr, "Empty Vorbis stream: %s (unmapped)\n", label);
         return (Audio){0};
     }
-    if ((uint64_t)total > SIZE_MAX / channels / sizeof(int16_t)) {
+    size_t capacity = (size_t)total * channels;
+    if ((uint64_t)total > SIZE_MAX / channels) {
         ov_clear(&vf);
         fail("Vorbis sample allocation overflows: %s", label);
     }
-    int16_t *pcm = allocate((size_t)total * channels, sizeof(*pcm));
+    int16_t *pcm = allocate(capacity, sizeof(*pcm));
     size_t frames = 0;
     for (;;) {
         float **samples;
         int link;
         long got = ov_read_float(&vf, &samples, 4096, &link);
         if (!got) break;
-        if (got < 0 || (uint64_t)got > (uint64_t)total - frames) {
+        if (got < 0) {
             free(pcm);
             ov_clear(&vf);
             fail("Corrupt Vorbis sample data: %s (decoder result %ld)", label, got);
+        }
+        if ((uint64_t)got > (uint64_t)SIZE_MAX / channels) {
+            free(pcm);
+            ov_clear(&vf);
+            fail("Vorbis sample chunk exceeds size limit: %s (%ld)", label, got);
+        }
+        size_t needed = frames + (size_t)got;
+        if ((uint64_t)needed * channels > capacity) {
+            size_t expanded = capacity ? capacity : 4096;
+            while ((uint64_t)needed * channels > expanded) expanded *= 2;
+            int16_t *resized = realloc(pcm, expanded * sizeof(*resized));
+            if (!resized) {
+                free(pcm);
+                ov_clear(&vf);
+                fail("Vorbis sample allocation overflows: %s", label);
+            }
+            pcm = resized;
+            capacity = expanded;
         }
         for (long f = 0; f < got; ++f)
             for (unsigned ch = 0; ch < channels; ++ch) {
@@ -366,9 +385,9 @@ static Audio decode_ogg(Slice data, const char *label) {
         frames += (size_t)got;
     }
     ov_clear(&vf);
-    if (frames != (size_t)total) {
+    if (!frames) {
         free(pcm);
-        fail("Truncated Vorbis PCM: %s (%zu of %lld frames)", label, frames, (long long)total);
+        fail("Empty Vorbis PCM output: %s", label);
     }
     return convert_pcm(pcm, frames * channels, rate, channels);
 }
