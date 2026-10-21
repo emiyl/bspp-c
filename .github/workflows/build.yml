@@ -73,3 +73,21 @@ jobs:
       - name: Build
         shell: bash
         run: cmake --build build --parallel
+
+      - name: Package build artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp build/cli/bspp dist/bspp-${{ matrix.name }}
+          cp build/lib/libbspp.a dist/libbspp-${{ matrix.name }}.a
+          chmod +x dist/bspp-${{ matrix.name }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bspp-${{ matrix.name }}
+          path: |
+            dist/bspp-${{ matrix.name }}
+            dist/libbspp-${{ matrix.name }}.a
+          if-no-files-found: error
+          retention-days: 7
