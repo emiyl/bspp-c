@@ -4,8 +4,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <time.h>
 
 bool bspp_verbose = false;
+
+static void print_runtime_summary(const struct timespec *start) {
+    if (!bspp_verbose) return;
+    struct timespec end;
+    struct rusage end_usage;
+    if (clock_gettime(CLOCK_MONOTONIC, &end)) return;
+    if (getrusage(RUSAGE_SELF, &end_usage)) return;
+
+    double elapsed = (double)(end.tv_sec - start->tv_sec) +
+                    (double)(end.tv_nsec - start->tv_nsec) / 1000000000.0;
+    size_t peak_bytes = (size_t)end_usage.ru_maxrss;
+#if defined(__linux__)
+    peak_bytes *= 1024;
+#endif
+
+    fprintf(stderr, "Peak memory usage: %.2f MiB (%zu bytes)\n",
+            (double)peak_bytes / (1024.0 * 1024.0), peak_bytes);
+    fprintf(stderr, "Execution time: %.3f s\n", elapsed);
+}
 
 typedef struct {
     char *name, *key;
@@ -414,6 +435,8 @@ static void ps3(const Options *o,const DataWin *dw,const Image *pages) {
     free(images); free(mapping); free(canvases); free(groups.items);
 }
 void process(const Options *o) {
+    struct timespec start = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &start)) start = (struct timespec){0};
     bspp_verbose = o->verbose;
     DataWin dw=parse_datawin(read_file(o->input),false,o->ps3);
     mkdirs(o->output);
@@ -425,4 +448,5 @@ void process(const Options *o) {
     for (size_t i=0;i<dw.texture_count;++i) free_image(&pages[i]);
     free(pages); free_datawin(&dw);
     if (bspp_verbose) puts("Done!");
+    print_runtime_summary(&start);
 }

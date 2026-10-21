@@ -31,7 +31,7 @@ Common flags:
 - `--atlas-size=<pixels>`: atlas size for PS2 output
 - `--force-4bpp=<regex>`: force 4bpp for matching images
 - `--debug-output=<path>`: extract debug PNGs
-- `-v, --verbose`: show processing progress and file output paths
+- `-v, --verbose`: show processing progress and file output paths, and runtime stats
 - `-h, --help`: show usage
 
 ### Library usage
