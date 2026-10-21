@@ -100,6 +100,6 @@ bool version_at_least(const DataWin *dw, int major, int minor, int release, int 
 int resolve_tpag(const DataWin *dw, uint32_t offset);
 Image extract_tpag(const Tpag *tpag, const Image *pages, size_t page_count);
 void process_audio(const DataWin *dw, const char *input_directory,
-                   Buffer *sound_bank, FILE *sounds);
+                   Buffer *sound_bank, FILE *sounds, bool parallel);
 
 #endif

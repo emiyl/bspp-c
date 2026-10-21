@@ -808,6 +808,7 @@ struct stb_vorbis
    uint8 *stream_end;
 
    uint32 stream_len;
+   uint32 crc_table[256];
 
    uint8  push_mode;
 
@@ -988,21 +989,20 @@ static void setup_temp_free(vorb *f, void *p, int sz)
 
 #define CRC32_POLY    0x04c11db7   // from spec
 
-static uint32 crc_table[256];
-static void crc32_init(void)
+static void crc32_init(vorb *f)
 {
    int i,j;
    uint32 s;
    for(i=0; i < 256; i++) {
       for (s=(uint32) i << 24, j=0; j < 8; ++j)
          s = (s << 1) ^ (s >= (1U<<31) ? CRC32_POLY : 0);
-      crc_table[i] = s;
+      f->crc_table[i] = s;
    }
 }
 
-static __forceinline uint32 crc32_update(uint32 crc, uint8 byte)
+static __forceinline uint32 crc32_update(vorb *f, uint32 crc, uint8 byte)
 {
-   return (crc << 8) ^ crc_table[byte ^ (crc >> 24)];
+   return (crc << 8) ^ f->crc_table[byte ^ (crc >> 24)];
 }
 
 
@@ -3706,7 +3706,7 @@ static int start_decoder(vorb *f)
    }
    #endif
 
-   crc32_init(); // always init it, to avoid multithread race conditions
+   crc32_init(f);
 
    if (get8_packet(f) != VORBIS_packet_setup)       return error(f, VORBIS_invalid_setup);
    for (i=0; i < 6; ++i) header[i] = get8_packet(f);
@@ -4383,10 +4383,10 @@ static int vorbis_search_for_page_pushdata(vorb *f, uint8 *data, int data_len)
                // scan everything up to the embedded crc (which we must 0)
                crc = 0;
                for (j=0; j < 22; ++j)
-                  crc = crc32_update(crc, data[i+j]);
+                  crc = crc32_update(f, crc, data[i+j]);
                // now process 4 0-bytes
                for (   ; j < 26; ++j)
-                  crc = crc32_update(crc, 0);
+                  crc = crc32_update(f, crc, 0);
                // len is the total number of bytes we need to scan
                n = f->page_crc_tests++;
                f->scan[n].bytes_left = len-j;
@@ -4416,7 +4416,7 @@ static int vorbis_search_for_page_pushdata(vorb *f, uint8 *data, int data_len)
       // m is the bytes to scan in the current chunk
       crc = f->scan[i].crc_so_far;
       for (j=0; j < m; ++j)
-         crc = crc32_update(crc, data[n+j]);
+         crc = crc32_update(f, crc, data[n+j]);
       f->scan[i].bytes_left -= m;
       f->scan[i].crc_so_far = crc;
       if (f->scan[i].bytes_left == 0) {
@@ -4591,16 +4591,16 @@ static uint32 vorbis_find_page(stb_vorbis *f, uint32 *end, uint32 *last)
                header[i] = 0;
             crc = 0;
             for (i=0; i < 27; ++i)
-               crc = crc32_update(crc, header[i]);
+               crc = crc32_update(f, crc, header[i]);
             len = 0;
             for (i=0; i < header[26]; ++i) {
                int s = get8(f);
-               crc = crc32_update(crc, s);
+               crc = crc32_update(f, crc, s);
                len += s;
             }
             if (len && f->eof) return 0;
             for (i=0; i < len; ++i)
-               crc = crc32_update(crc, get8(f));
+               crc = crc32_update(f, crc, get8(f));
             // finished parsing probable page
             if (crc == goal) {
                // we could now check that it's either got the last

@@ -535,7 +535,7 @@ static void audio_files(const Options *o,const DataWin *dw) {
     FILE *sounds=fopen(sounds_path,"wb");
     if (!sounds) fail("cannot create '%s': %s",sounds_path,strerror(errno));
     Buffer bank={0};
-    process_audio(dw,directory,&bank,sounds);
+    process_audio(dw,directory,&bank,sounds,!o->no_parallel);
     long sounds_size=ftell(sounds);
     if (sounds_size<0) fail("cannot tell '%s': %s",sounds_path,strerror(errno));
     if (fclose(sounds)) fail("cannot close '%s': %s",sounds_path,strerror(errno));

@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -367,6 +368,91 @@ static Audio decode_audio(Slice data, const char *label) {
     return (Audio){0};
 }
 
+enum { AUDIO_WORKERS=4 };
+typedef struct {
+    Slice data;
+    const char *path, *label;
+    size_t sound;
+    Audio result;
+} AudioJob;
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t work, done;
+    pthread_t threads[AUDIO_WORKERS];
+    size_t worker_count, count, next, finished;
+    bool stopping;
+    AudioJob *jobs;
+} AudioPool;
+
+static void audio_thread_check(int error, const char *operation) {
+    if (error) fail("audio worker %s: %s",operation,strerror(error));
+}
+
+static void decode_job(AudioJob *job) {
+    Buffer data={0};
+    if (job->path) data=read_file(job->path);
+    job->result=decode_audio(job->path ? (Slice){data.data,data.size}:job->data,job->label);
+    free(data.data);
+}
+
+static void *audio_pool_worker(void *context) {
+    AudioPool *pool=context;
+    audio_thread_check(pthread_mutex_lock(&pool->mutex),"lock");
+    for (;;) {
+        while (pool->next==pool->count && !pool->stopping)
+            audio_thread_check(pthread_cond_wait(&pool->work,&pool->mutex),"wait for work");
+        if (pool->stopping) break;
+        AudioJob *job=&pool->jobs[pool->next++];
+        audio_thread_check(pthread_mutex_unlock(&pool->mutex),"unlock");
+        decode_job(job);
+        audio_thread_check(pthread_mutex_lock(&pool->mutex),"lock");
+        if (++pool->finished==pool->count)
+            audio_thread_check(pthread_cond_signal(&pool->done),"signal completion");
+    }
+    audio_thread_check(pthread_mutex_unlock(&pool->mutex),"unlock");
+    return NULL;
+}
+
+static void start_audio_pool(AudioPool *pool, bool parallel) {
+    if (!parallel) return;
+    audio_thread_check(pthread_mutex_init(&pool->mutex,NULL),"initialize mutex");
+    audio_thread_check(pthread_cond_init(&pool->work,NULL),"initialize work condition");
+    audio_thread_check(pthread_cond_init(&pool->done,NULL),"initialize completion condition");
+    for (size_t i=0;i<AUDIO_WORKERS;++i) {
+        audio_thread_check(pthread_create(&pool->threads[i],NULL,audio_pool_worker,pool),"start");
+        ++pool->worker_count;
+    }
+}
+
+static void decode_jobs(AudioPool *pool, AudioJob *jobs, size_t count) {
+    if (!count) return;
+    if (!pool->worker_count) {
+        for (size_t i=0;i<count;++i) decode_job(&jobs[i]);
+        return;
+    }
+    audio_thread_check(pthread_mutex_lock(&pool->mutex),"lock");
+    pool->jobs=jobs;
+    pool->count=count;
+    pool->next=pool->finished=0;
+    audio_thread_check(pthread_cond_broadcast(&pool->work),"dispatch batch");
+    while (pool->finished<count)
+        audio_thread_check(pthread_cond_wait(&pool->done,&pool->mutex),"wait for completion");
+    audio_thread_check(pthread_mutex_unlock(&pool->mutex),"unlock");
+}
+
+static void stop_audio_pool(AudioPool *pool) {
+    if (!pool->worker_count) return;
+    audio_thread_check(pthread_mutex_lock(&pool->mutex),"lock");
+    pool->stopping=true;
+    audio_thread_check(pthread_cond_broadcast(&pool->work),"stop workers");
+    audio_thread_check(pthread_mutex_unlock(&pool->mutex),"unlock");
+    for (size_t i=0;i<pool->worker_count;++i)
+        audio_thread_check(pthread_join(pool->threads[i],NULL),"join");
+    audio_thread_check(pthread_cond_destroy(&pool->work),"destroy work condition");
+    audio_thread_check(pthread_cond_destroy(&pool->done),"destroy completion condition");
+    audio_thread_check(pthread_mutex_destroy(&pool->mutex),"destroy mutex");
+}
+
 static size_t append_audio(Audio **items, size_t *count, Audio audio) {
     count16(*count + 1, "AUDO entries");
     *items = resize_array(*items, *count + 1, sizeof(**items));
@@ -390,6 +476,23 @@ static void free_audio_bytes(Audio *audio) {
     audio->bytes.data = NULL;
 }
 
+static void flush_sound_jobs(AudioPool *pool, AudioJob *jobs, size_t *count,
+                             Audio **audio, size_t *audio_count, uint16_t *mapping,
+                             FILE *sounds, size_t *sounds_size) {
+    decode_jobs(pool,jobs,*count);
+    for (size_t i=0;i<*count;++i) {
+        Audio *decoded=&jobs[i].result;
+        if (decoded->valid) {
+            append_samples(sounds,sounds_size,decoded);
+            size_t index=append_audio(audio,audio_count,*decoded);
+            mapping[jobs[i].sound]=(uint16_t)index;
+            free_audio_bytes(&(*audio)[index]);
+        }
+        free((char *)jobs[i].label);
+    }
+    *count=0;
+}
+
 static int32_t kotlin_int(float value) {
     if (isnan(value)) return 0;
     if ((double)value >= INT32_MAX) return INT32_MAX;
@@ -398,7 +501,7 @@ static int32_t kotlin_int(float value) {
 }
 
 void process_audio(const DataWin *dw, const char *input_directory,
-                   Buffer *sound_bank, FILE *sounds) {
+                   Buffer *sound_bank, FILE *sounds, bool parallel) {
     if (bspp_verbose) fprintf(stderr, "Audio: processing from directory %s\n", input_directory);
     if (sound_bank->size) fail("Sound bank buffer must initially be empty");
     size_t sounds_size=0;
@@ -408,18 +511,29 @@ void process_audio(const DataWin *dw, const char *input_directory,
     scan_directory(&files, input_directory, "", 0);
     if (files.music_count > 1)
         qsort(files.music, files.music_count, sizeof(*files.music), compare_music);
+    AudioPool pool={0};
+    start_audio_pool(&pool,parallel && (dw->audio_count || dw->sound_count || files.music_count));
+    size_t batch_size=pool.worker_count ? pool.worker_count:1;
+    AudioJob jobs[AUDIO_WORKERS];
+    size_t pending=0;
     size_t audio_count = dw->audio_count;
     Audio *audio = allocate(audio_count, sizeof(*audio));
     uint16_t *mapping = allocate(dw->sound_count, sizeof(*mapping));
     for (size_t i = 0; i < dw->sound_count; ++i) mapping[i] = UINT16_MAX;
-    for (size_t i = 0; i < audio_count; ++i) {
-        char *label = format_string("embedded AUDO #%zu", i);
-        audio[i] = decode_audio(dw->audio[i], label);
-        free(label);
-        if (audio[i].valid) {
-            append_samples(sounds, &sounds_size, &audio[i]);
-            free_audio_bytes(&audio[i]);
+    for (size_t i=0;i<audio_count;) {
+        size_t n=audio_count-i<batch_size ? audio_count-i:batch_size;
+        for (size_t j=0;j<n;++j)
+            jobs[j]=(AudioJob){.data=dw->audio[i+j],.label=format_string("embedded AUDO #%zu",i+j)};
+        decode_jobs(&pool,jobs,n);
+        for (size_t j=0;j<n;++j) {
+            audio[i+j]=jobs[j].result;
+            free((char *)jobs[j].label);
+            if (audio[i+j].valid) {
+                append_samples(sounds,&sounds_size,&audio[i+j]);
+                free_audio_bytes(&audio[i+j]);
+            }
         }
+        i+=n;
     }
     /* Group decodes append in SOND order, before any external file decodes. */
     DataWin loaded_group={0};
@@ -433,6 +547,7 @@ void process_audio(const DataWin *dw, const char *input_directory,
         const DataWin *group=NULL;
         if (group_index!=SIZE_MAX) {
             if (group_index!=loaded_index) {
+                flush_sound_jobs(&pool,jobs,&pending,&audio,&audio_count,mapping,sounds,&sounds_size);
                 free_datawin(&loaded_group);
                 const char *path=files.groups[group_index].path;
                 if (bspp_verbose) fprintf(stderr,"Parsing %s\n",path);
@@ -446,15 +561,12 @@ void process_audio(const DataWin *dw, const char *input_directory,
                     sound->group, sound->audio, i);
             continue;
         }
-        char *label = format_string("audiogroup%d/%d (SOND #%zu)", sound->group, sound->audio, i);
-        Audio decoded = decode_audio(group->audio[sound->audio], label);
-        free(label);
-        if (decoded.valid) {
-            append_samples(sounds, &sounds_size, &decoded);
-            mapping[i] = (uint16_t)append_audio(&audio, &audio_count, decoded);
-            free_audio_bytes(&audio[mapping[i]]);
-        }
+        jobs[pending++]=(AudioJob){.data=group->audio[sound->audio],.sound=i,
+            .label=format_string("audiogroup%d/%d (SOND #%zu)",sound->group,sound->audio,i)};
+        if (pending==batch_size)
+            flush_sound_jobs(&pool,jobs,&pending,&audio,&audio_count,mapping,sounds,&sounds_size);
     }
+    flush_sound_jobs(&pool,jobs,&pending,&audio,&audio_count,mapping,sounds,&sounds_size);
     free_datawin(&loaded_group);
     for (size_t i = 0; i < dw->sound_count; ++i) {
         const Sound *sound = &dw->sounds[i];
@@ -474,29 +586,32 @@ void process_audio(const DataWin *dw, const char *input_directory,
                     i, sound->file ? sound->file : "(no filename)");
             continue;
         }
-        Buffer data=external->consumed ? (Buffer){0}:read_file(external->path);
-        Audio decoded = decode_audio((Slice){data.data,data.size}, external->name);
-        if (decoded.valid) {
-            append_samples(sounds, &sounds_size, &decoded);
-            mapping[i] = (uint16_t)append_audio(&audio, &audio_count, decoded);
-            free_audio_bytes(&audio[mapping[i]]);
-        }
-        free(data.data);
+        jobs[pending++]=(AudioJob){.path=external->consumed ? NULL:external->path,
+            .label=copy_string(external->name),.sound=i};
         external->consumed=true;
+        if (pending==batch_size)
+            flush_sound_jobs(&pool,jobs,&pending,&audio,&audio_count,mapping,sounds,&sounds_size);
     }
+    flush_sound_jobs(&pool,jobs,&pending,&audio,&audio_count,mapping,sounds,&sounds_size);
     size_t music_count = 0;
-    for (size_t i = 0; i < files.music_count; ++i) {
-        char *path = join_path(input_directory, files.music[i].path);
-        Buffer data = read_file(path);
-        files.music[i].audio = decode_audio((Slice){data.data, data.size}, files.music[i].path);
-        free(data.data);
-        free(path);
-        if (files.music[i].audio.valid) {
-            append_samples(sounds, &sounds_size, &files.music[i].audio);
-            free_audio_bytes(&files.music[i].audio);
-            ++music_count;
+    for (size_t i=0;i<files.music_count;) {
+        size_t n=files.music_count-i<batch_size ? files.music_count-i:batch_size;
+        for (size_t j=0;j<n;++j)
+            jobs[j]=(AudioJob){.path=join_path(input_directory,files.music[i+j].path),
+                              .label=files.music[i+j].path};
+        decode_jobs(&pool,jobs,n);
+        for (size_t j=0;j<n;++j) {
+            files.music[i+j].audio=jobs[j].result;
+            free((char *)jobs[j].path);
+            if (files.music[i+j].audio.valid) {
+                append_samples(sounds,&sounds_size,&files.music[i+j].audio);
+                free_audio_bytes(&files.music[i+j].audio);
+                ++music_count;
+            }
         }
+        i+=n;
     }
+    stop_audio_pool(&pool);
     put8(sound_bank, 0);
     put16(sound_bank, dw->sound_count, false);
     put16(sound_bank, audio_count, false);
