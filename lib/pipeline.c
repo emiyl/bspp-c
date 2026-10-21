@@ -603,7 +603,7 @@ void process(const Options *o) {
     struct timespec start = {0};
     if (clock_gettime(CLOCK_MONOTONIC, &start)) start = (struct timespec){0};
     bspp_verbose = o->verbose;
-    DataWin dw=parse_datawin(read_file(o->input),false,o->ps3);
+    DataWin dw=load_datawin(o->input,false,o->ps3);
     mkdirs(o->output);
     Image *pages=allocate(dw.texture_count,sizeof *pages);
     if (o->ps3) ps3(o,&dw,pages);

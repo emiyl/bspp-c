@@ -392,7 +392,7 @@ void process_audio(const DataWin *dw, const char *input_directory,
                 free_datawin(&loaded_group);
                 const char *path=files.groups[group_index].path;
                 if (bspp_verbose) fprintf(stderr,"Parsing %s\n",path);
-                loaded_group=parse_datawin(read_file(path),true,false);
+                loaded_group=load_datawin(path,true,false);
                 loaded_index=group_index;
             }
             group=&loaded_group;

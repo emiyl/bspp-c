@@ -188,7 +188,7 @@ Image decode_image(Slice data, bool gm2022_5) {
     if (png.width > INT_MAX || png.height > INT_MAX) fail("PNG: dimensions too large");
     Image result = new_image((int)png.width, (int)png.height);
     size_t count = pixel_count(result.width, result.height);
-    uint8_t *rgba = allocate(count, 4);
+    uint8_t *rgba = (uint8_t *)result.pixels;
     png.format = PNG_FORMAT_RGBA;
     if (!png_image_finish_read(&png, NULL, rgba, 0, NULL))
         fail("PNG: %s", png.message);
@@ -197,7 +197,6 @@ Image decode_image(Slice data, bool gm2022_5) {
         result.pixels[i] = png_argb(p);
     }
     png_image_free(&png);
-    free(rgba);
     return result;
 #else
     png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);

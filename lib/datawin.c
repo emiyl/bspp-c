@@ -1,7 +1,12 @@
 #include "native.h"
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 typedef struct { Slice data; size_t count; } Table;
 
@@ -121,6 +126,22 @@ static void rooms(DataWin *dw, Slice s, Table t) {
                 fail("unsupported room layer type %d",type);
         }
     }
+}
+
+DataWin load_datawin(const char *path, bool audio_only, bool ps3) {
+    int file=open(path,O_RDONLY);
+    if (file<0) fail("cannot open '%s': %s",path,strerror(errno));
+    struct stat st;
+    if (fstat(file,&st)) fail("cannot inspect '%s': %s",path,strerror(errno));
+    if (!S_ISREG(st.st_mode) || st.st_size<8 || (uintmax_t)st.st_size>SIZE_MAX)
+        fail("invalid data.win file size or type: '%s'",path);
+    size_t size=(size_t)st.st_size;
+    void *data=mmap(NULL,size,PROT_READ,MAP_PRIVATE,file,0);
+    if (data==MAP_FAILED) fail("cannot map '%s': %s",path,strerror(errno));
+    if (close(file)) fail("cannot close '%s': %s",path,strerror(errno));
+    DataWin dw=parse_datawin((Buffer){data,size,size},audio_only,ps3);
+    dw.source_mapped=true;
+    return dw;
 }
 
 DataWin parse_datawin(Buffer source, bool audio_only, bool ps3) {
@@ -270,6 +291,9 @@ void free_datawin(DataWin *dw) {
     for (size_t i=0;i<dw->font_count;++i) free(dw->fonts[i].name);
     for (size_t i=0;i<dw->sound_count;++i) { free(dw->sounds[i].name); free(dw->sounds[i].file); }
     free(dw->sprites); free(dw->backgrounds); free(dw->fonts); free(dw->sounds);
-    free(dw->tpags); free(dw->textures); free(dw->tiles); free(dw->audio); free(dw->source.data);
+    free(dw->tpags); free(dw->textures); free(dw->tiles); free(dw->audio);
+    if (dw->source_mapped) {
+        if (munmap(dw->source.data,dw->source.size)) fail("cannot unmap data.win: %s",strerror(errno));
+    } else free(dw->source.data);
     memset(dw,0,sizeof *dw);
 }

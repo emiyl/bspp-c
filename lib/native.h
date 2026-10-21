@@ -75,6 +75,7 @@ typedef struct {
 } Sound;
 typedef struct {
     Buffer source;
+    bool source_mapped;
     int version[4], bytecode;
     Tpag *tpags; size_t tpag_count;
     Slice *textures; size_t texture_count;
@@ -86,6 +87,7 @@ typedef struct {
     Slice *audio; size_t audio_count;
 } DataWin;
 DataWin parse_datawin(Buffer source, bool audio_only, bool ps3);
+DataWin load_datawin(const char *path, bool audio_only, bool ps3);
 void free_datawin(DataWin *dw);
 bool version_at_least(const DataWin *dw, int major, int minor, int release, int build);
 int resolve_tpag(const DataWin *dw, uint32_t offset);
