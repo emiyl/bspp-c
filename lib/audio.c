@@ -418,6 +418,12 @@ static void append_samples(Buffer *sounds, Audio *audio) {
     append(sounds, audio->bytes.data, audio->bytes.size);
 }
 
+static void free_audio_bytes(Audio *audio) {
+    if (!audio || !audio->bytes.data) return;
+    free(audio->bytes.data);
+    audio->bytes.data = NULL;
+}
+
 static int32_t kotlin_int(float value) {
     if (isnan(value)) return 0;
     if ((double)value >= INT32_MAX) return INT32_MAX;
@@ -443,6 +449,10 @@ void process_audio(const DataWin *dw, const char *input_directory,
         char *label = format_string("embedded AUDO #%zu", i);
         audio[i] = decode_audio(dw->audio[i], label);
         free(label);
+        if (audio[i].valid) {
+            append_samples(sounds, &audio[i]);
+            free_audio_bytes(&audio[i]);
+        }
     }
     /* Group decodes append in SOND order, before any external file decodes. */
     for (size_t i = 0; i < dw->sound_count; ++i) {
@@ -459,7 +469,11 @@ void process_audio(const DataWin *dw, const char *input_directory,
         char *label = format_string("audiogroup%d/%d (SOND #%zu)", sound->group, sound->audio, i);
         Audio decoded = decode_audio(group->audio[sound->audio], label);
         free(label);
-        if (decoded.valid) mapping[i] = (uint16_t)append_audio(&audio, &audio_count, decoded);
+        if (decoded.valid) {
+            append_samples(sounds, &decoded);
+            mapping[i] = (uint16_t)append_audio(&audio, &audio_count, decoded);
+            free_audio_bytes(&audio[mapping[i]]);
+        }
     }
     for (size_t i = 0; i < dw->sound_count; ++i) {
         const Sound *sound = &dw->sounds[i];
@@ -480,7 +494,13 @@ void process_audio(const DataWin *dw, const char *input_directory,
             continue;
         }
         Audio decoded = decode_audio((Slice){external->bytes.data, external->bytes.size}, external->name);
-        if (decoded.valid) mapping[i] = (uint16_t)append_audio(&audio, &audio_count, decoded);
+        if (decoded.valid) {
+            append_samples(sounds, &decoded);
+            mapping[i] = (uint16_t)append_audio(&audio, &audio_count, decoded);
+            free_audio_bytes(&audio[mapping[i]]);
+        }
+        free(external->bytes.data);
+        external->bytes.data = NULL;
     }
     size_t music_count = 0;
     for (size_t i = 0; i < files.music_count; ++i) {
@@ -489,10 +509,12 @@ void process_audio(const DataWin *dw, const char *input_directory,
         files.music[i].audio = decode_audio((Slice){data.data, data.size}, files.music[i].path);
         free(data.data);
         free(path);
-        if (files.music[i].audio.valid) ++music_count;
+        if (files.music[i].audio.valid) {
+            append_samples(sounds, &files.music[i].audio);
+            free_audio_bytes(&files.music[i].audio);
+            ++music_count;
+        }
     }
-    for (size_t i = 0; i < audio_count; ++i) append_samples(sounds, &audio[i]);
-    for (size_t i = 0; i < files.music_count; ++i) append_samples(sounds, &files.music[i].audio);
     put8(sound_bank, 0);
     put16(sound_bank, dw->sound_count, false);
     put16(sound_bank, audio_count, false);
