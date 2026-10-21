@@ -11,7 +11,8 @@ static size_t pixel_count(int width, int height) {
     if (width <= 0 || height <= 0 ||
         (uintmax_t)width > (uintmax_t)INT32_MAX / (uintmax_t)height ||
         (uintmax_t)width > (uintmax_t)SIZE_MAX / (uintmax_t)height)
-        fail("Image: invalid or unrepresentable dimensions %d x %d", width, height);
+        fail("Image: invalid or unrepresentable dimensions %d x %d", width,
+             height);
     return (size_t)width * (size_t)height;
 }
 
@@ -23,7 +24,8 @@ Image new_image(int width, int height) {
 }
 
 void free_image(Image *image) {
-    if (!image) return;
+    if (!image)
+        return;
     free(image->pixels);
     *image = (Image){0};
 }
@@ -34,20 +36,26 @@ static int signed_bits(unsigned value, unsigned bits) {
 }
 
 static unsigned qoi_byte(Slice payload, size_t *position) {
-    if (*position >= payload.size) fail("QOI: truncated pixel opcode");
+    if (*position >= payload.size)
+        fail("QOI: truncated pixel opcode");
     return payload.data[(*position)++];
 }
 
 static uint32_t png_argb(const uint8_t *p) {
-    unsigned a=p[3];
-    uint32_t color=(uint32_t)a<<24;
-    if (!a) return 0;
-    for (int ch=0;ch<3;++ch) {
-        unsigned premultiplied=(p[ch]*a+127)/255;
-        uint32_t increment=(UINT32_C(0xff000000)+a/2)/a;
-        unsigned value=premultiplied>=a ? 255 :
-            (unsigned)((UINT64_C(0x800000)+(uint64_t)premultiplied*increment)>>24);
-        color|=(uint32_t)value<<(16-ch*8);
+    unsigned a = p[3];
+    uint32_t color = (uint32_t)a << 24;
+    if (!a)
+        return 0;
+    for (int ch = 0; ch < 3; ++ch) {
+        unsigned premultiplied = (p[ch] * a + 127) / 255;
+        uint32_t increment = (UINT32_C(0xff000000) + a / 2) / a;
+        unsigned value =
+            premultiplied >= a
+                ? 255
+                : (unsigned)((UINT64_C(0x800000) +
+                              (uint64_t)premultiplied * increment) >>
+                             24);
+        color |= (uint32_t)value << (16 - ch * 8);
     }
     return color;
 }
@@ -72,8 +80,10 @@ static Image decode_qoi(Slice data) {
             unsigned first = qoi_byte(payload, &pos);
             if ((first & 0xc0) == 0) {
                 uint32_t color = index[first & 63];
-                a = color >> 24; r = (color >> 16) & 255;
-                g = (color >> 8) & 255; b = color & 255;
+                a = color >> 24;
+                r = (color >> 16) & 255;
+                g = (color >> 8) & 255;
+                b = color & 255;
             } else if ((first & 0xe0) == 0x40) {
                 run = first & 31;
             } else if ((first & 0xe0) == 0x60) {
@@ -96,12 +106,17 @@ static Image decode_qoi(Slice data) {
                 b = (b + signed_bits((value >> 5) & 31, 5)) & 255;
                 a = (a + signed_bits(value & 31, 5)) & 255;
             } else {
-                if (first & 8) r = qoi_byte(payload, &pos);
-                if (first & 4) g = qoi_byte(payload, &pos);
-                if (first & 2) b = qoi_byte(payload, &pos);
-                if (first & 1) a = qoi_byte(payload, &pos);
+                if (first & 8)
+                    r = qoi_byte(payload, &pos);
+                if (first & 4)
+                    g = qoi_byte(payload, &pos);
+                if (first & 2)
+                    b = qoi_byte(payload, &pos);
+                if (first & 1)
+                    a = qoi_byte(payload, &pos);
             }
-            if (run > count - i - 1) fail("QOI: run exceeds image dimensions");
+            if (run > count - i - 1)
+                fail("QOI: run exceeds image dimensions");
             index[(r ^ g ^ b ^ a) & 63] = (a << 24) | (r << 16) | (g << 8) | b;
         }
         image.pixels[i] = (a << 24) | (r << 16) | (g << 8) | b;
@@ -111,7 +126,8 @@ static Image decode_qoi(Slice data) {
 
 static Image decode_bz2_qoi(Slice data, bool modern) {
     size_t header = modern ? 12 : 8;
-    if (data.size < header) fail("BZ2-QOI: truncated header");
+    if (data.size < header)
+        fail("BZ2-QOI: truncated header");
     int width = u16(data, 4), height = u16(data, 6);
     pixel_count(width, height);
     size_t declared = modern ? u32(data, 8) : 0;
@@ -121,7 +137,8 @@ static Image decode_bz2_qoi(Slice data, bool modern) {
         fail("BZ2-QOI: compressed input too large");
     bz_stream stream = {0};
     int status = BZ2_bzDecompressInit(&stream, 0, 0);
-    if (status != BZ_OK) fail("BZ2-QOI: cannot initialize decoder (%d)", status);
+    if (status != BZ_OK)
+        fail("BZ2-QOI: cannot initialize decoder (%d)", status);
     stream.next_in = (char *)(data.data + header);
     stream.avail_in = (unsigned)(data.size - header);
     size_t output_limit = modern ? declared : UINT_MAX;
@@ -130,11 +147,13 @@ static Image decode_bz2_qoi(Slice data, bool modern) {
     size_t used = 0;
     for (;;) {
         if (used == capacity && capacity < output_limit) {
-            size_t next = capacity > output_limit / 2 ? output_limit : capacity * 2;
+            size_t next =
+                capacity > output_limit / 2 ? output_limit : capacity * 2;
             output = resize_array(output, next, 1);
             capacity = next;
         }
-        /* Allow the decoder to consume its trailer at the exact output limit. */
+        /* Allow the decoder to consume its trailer at the exact output limit.
+         */
         char overflow;
         bool at_limit = used == output_limit;
         stream.next_out = at_limit ? &overflow : (char *)output + used;
@@ -142,15 +161,19 @@ static Image decode_bz2_qoi(Slice data, bool modern) {
         unsigned before_in = stream.avail_in, before_out = stream.avail_out;
         status = BZ2_bzDecompress(&stream);
         unsigned produced = before_out - stream.avail_out;
-        if (at_limit && produced) fail("BZ2-QOI: decompressed data exceeds length limit");
+        if (at_limit && produced)
+            fail("BZ2-QOI: decompressed data exceeds length limit");
         used += produced;
-        if (status == BZ_STREAM_END) break;
-        if (status != BZ_OK) fail("BZ2-QOI: invalid compressed stream (%d)", status);
+        if (status == BZ_STREAM_END)
+            break;
+        if (status != BZ_OK)
+            fail("BZ2-QOI: invalid compressed stream (%d)", status);
         if (before_in == stream.avail_in && before_out == stream.avail_out)
             fail("BZ2-QOI: truncated compressed stream");
     }
     BZ2_bzDecompressEnd(&stream);
-    if (modern && used != declared) fail("BZ2-QOI: uncompressed length mismatch");
+    if (modern && used != declared)
+        fail("BZ2-QOI: uncompressed length mismatch");
     Image result = decode_qoi((Slice){output, used});
     free(output);
     if (result.width != width || result.height != height)
@@ -165,9 +188,12 @@ struct PngMemorySource {
     size_t offset;
 };
 
-static void png_read_memory_callback(png_structp png_ptr, png_bytep out, png_size_t size) {
-    struct PngMemorySource *src = (struct PngMemorySource *)png_get_io_ptr(png_ptr);
-    if (size > src->size - src->offset) size = src->size - src->offset;
+static void png_read_memory_callback(png_structp png_ptr, png_bytep out,
+                                     png_size_t size) {
+    struct PngMemorySource *src =
+        (struct PngMemorySource *)png_get_io_ptr(png_ptr);
+    if (size > src->size - src->offset)
+        size = src->size - src->offset;
     if (size > 0) {
         memcpy(out, src->data + src->offset, size);
         src->offset += size;
@@ -176,17 +202,22 @@ static void png_read_memory_callback(png_structp png_ptr, png_bytep out, png_siz
 #endif
 
 Image decode_image(Slice data, bool gm2022_5) {
-    if (!data.data || data.size < 4) fail("Image: truncated header");
-    if (!memcmp(data.data, "fioq", 4)) return decode_qoi(data);
-    if (!memcmp(data.data, "2zoq", 4)) return decode_bz2_qoi(data, gm2022_5);
+    if (!data.data || data.size < 4)
+        fail("Image: truncated header");
+    if (!memcmp(data.data, "fioq", 4))
+        return decode_qoi(data);
+    if (!memcmp(data.data, "2zoq", 4))
+        return decode_bz2_qoi(data, gm2022_5);
     if (data.size < 8 || png_sig_cmp((png_bytep)data.data, 0, 8))
         fail("Image: unsupported format (expected PNG, fioq or 2zoq)");
-#if PNG_LIBPNG_VER_MAJOR > 1 || (PNG_LIBPNG_VER_MAJOR == 1 && PNG_LIBPNG_VER_MINOR >= 6)
+#if PNG_LIBPNG_VER_MAJOR > 1 ||                                                \
+    (PNG_LIBPNG_VER_MAJOR == 1 && PNG_LIBPNG_VER_MINOR >= 6)
     png_image png = {0};
     png.version = PNG_IMAGE_VERSION;
     if (!png_image_begin_read_from_memory(&png, data.data, data.size))
         fail("PNG: %s", png.message);
-    if (png.width > INT_MAX || png.height > INT_MAX) fail("PNG: dimensions too large");
+    if (png.width > INT_MAX || png.height > INT_MAX)
+        fail("PNG: dimensions too large");
     Image result = new_image((int)png.width, (int)png.height);
     size_t count = pixel_count(result.width, result.height);
     uint8_t *rgba = (uint8_t *)result.pixels;
@@ -200,8 +231,10 @@ Image decode_image(Slice data, bool gm2022_5) {
     png_image_free(&png);
     return result;
 #else
-    png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png) fail("PNG: cannot create read struct");
+    png_structp png =
+        png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png)
+        fail("PNG: cannot create read struct");
     png_infop info = png_create_info_struct(png);
     if (!info) {
         png_destroy_read_struct(&png, NULL, NULL);
@@ -211,19 +244,29 @@ Image decode_image(Slice data, bool gm2022_5) {
         png_destroy_read_struct(&png, &info, NULL);
         fail("PNG: decode failed");
     }
-    struct PngMemorySource source = { data.data, data.size, 0 };
+    struct PngMemorySource source = {data.data, data.size, 0};
     png_set_read_fn(png, &source, png_read_memory_callback);
     png_read_info(png, info);
     png_uint_32 width = 0, height = 0;
-    int bit_depth = 0, color_type = 0, interlace_type = 0, compression_type = 0, filter_method = 0;
-    png_get_IHDR(png, info, &width, &height, &bit_depth, &color_type, &interlace_type, &compression_type, &filter_method);
-    if (width > INT_MAX || height > INT_MAX) fail("PNG: dimensions too large");
-    if (bit_depth == 16) png_set_strip_16(png);
-    if (color_type == PNG_COLOR_TYPE_PALETTE) png_set_palette_to_rgb(png);
-    if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) png_set_expand_gray_1_2_4_to_8(png);
-    if (png_get_valid(png, info, PNG_INFO_tRNS)) png_set_tRNS_to_alpha(png);
-    if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA) png_set_gray_to_rgb(png);
-    if (bit_depth < 8) png_set_packing(png);
+    int bit_depth = 0, color_type = 0, interlace_type = 0, compression_type = 0,
+        filter_method = 0;
+    png_get_IHDR(png, info, &width, &height, &bit_depth, &color_type,
+                 &interlace_type, &compression_type, &filter_method);
+    if (width > INT_MAX || height > INT_MAX)
+        fail("PNG: dimensions too large");
+    if (bit_depth == 16)
+        png_set_strip_16(png);
+    if (color_type == PNG_COLOR_TYPE_PALETTE)
+        png_set_palette_to_rgb(png);
+    if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8)
+        png_set_expand_gray_1_2_4_to_8(png);
+    if (png_get_valid(png, info, PNG_INFO_tRNS))
+        png_set_tRNS_to_alpha(png);
+    if (color_type == PNG_COLOR_TYPE_GRAY ||
+        color_type == PNG_COLOR_TYPE_GRAY_ALPHA)
+        png_set_gray_to_rgb(png);
+    if (bit_depth < 8)
+        png_set_packing(png);
     png_read_update_info(png, info);
     Image result = new_image((int)width, (int)height);
     size_t rowbytes = png_get_rowbytes(png, info);
@@ -244,7 +287,8 @@ Image decode_image(Slice data, bool gm2022_5) {
 
 void save_png(const char *path, const Image *image) {
     size_t count = pixel_count(image->width, image->height);
-    if (!image->pixels) fail("PNG: missing pixel data");
+    if (!image->pixels)
+        fail("PNG: missing pixel data");
     uint8_t *rgba = allocate(count, 4);
     for (size_t i = 0; i < count; ++i) {
         uint32_t p = image->pixels[i];
@@ -253,7 +297,8 @@ void save_png(const char *path, const Image *image) {
         rgba[i * 4 + 2] = (uint8_t)p;
         rgba[i * 4 + 3] = (uint8_t)(p >> 24);
     }
-#if PNG_LIBPNG_VER_MAJOR > 1 || (PNG_LIBPNG_VER_MAJOR == 1 && PNG_LIBPNG_VER_MINOR >= 6)
+#if PNG_LIBPNG_VER_MAJOR > 1 ||                                                \
+    (PNG_LIBPNG_VER_MAJOR == 1 && PNG_LIBPNG_VER_MINOR >= 6)
     png_image png = {0};
     png.version = PNG_IMAGE_VERSION;
     png.width = (png_uint_32)image->width;
@@ -264,8 +309,10 @@ void save_png(const char *path, const Image *image) {
     png_image_free(&png);
 #else
     FILE *fp = fopen(path, "wb");
-    if (!fp) fail("PNG: cannot write %s", path);
-    png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!fp)
+        fail("PNG: cannot write %s", path);
+    png_structp png =
+        png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
     if (!png) {
         fclose(fp);
         fail("PNG: cannot create write struct");
@@ -283,7 +330,8 @@ void save_png(const char *path, const Image *image) {
     }
     png_init_io(png, fp);
     png_set_IHDR(png, info, image->width, image->height, 8, PNG_COLOR_TYPE_RGBA,
-                 PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+                 PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
+                 PNG_FILTER_TYPE_DEFAULT);
     png_write_info(png, info);
     for (int y = 0; y < image->height; ++y) {
         png_write_row(png, (png_bytep)(rgba + (size_t)y * image->width * 4));
@@ -304,8 +352,10 @@ static int color_index(const uint32_t *colors, int count, uint32_t color) {
     int low = 0, high = count;
     while (low < high) {
         int middle = low + (high - low) / 2;
-        if (colors[middle] < color) low = middle + 1;
-        else high = middle;
+        if (colors[middle] < color)
+            low = middle + 1;
+        else
+            high = middle;
     }
     return low < count && colors[low] == color ? low : -1;
 }
@@ -333,7 +383,8 @@ typedef struct {
     bool split_usable;
 } QuantBox;
 
-static QuantBox quant_box_make(const uint32_t *pixels, size_t offset, size_t count) {
+static QuantBox quant_box_make(const uint32_t *pixels, size_t offset,
+                               size_t count) {
     unsigned r_min = 255, r_max = 0, g_min = 255, g_max = 0;
     unsigned b_min = 255, b_max = 0, a_min = 255, a_max = 0;
     for (size_t i = 0; i < count; ++i) {
@@ -342,16 +393,25 @@ static QuantBox quant_box_make(const uint32_t *pixels, size_t offset, size_t cou
         unsigned r = (p >> 16) & 255;
         unsigned g = (p >> 8) & 255;
         unsigned b = p & 255;
-        if (r_min > r) r_min = r;
-        if (r_max < r) r_max = r;
-        if (g_min > g) g_min = g;
-        if (g_max < g) g_max = g;
-        if (b_min > b) b_min = b;
-        if (b_max < b) b_max = b;
-        if (a_min > a) a_min = a;
-        if (a_max < a) a_max = a;
+        if (r_min > r)
+            r_min = r;
+        if (r_max < r)
+            r_max = r;
+        if (g_min > g)
+            g_min = g;
+        if (g_max < g)
+            g_max = g;
+        if (b_min > b)
+            b_min = b;
+        if (b_max < b)
+            b_max = b;
+        if (a_min > a)
+            a_min = a;
+        if (a_max < a)
+            a_max = a;
     }
-    QuantBox result = {offset, count, r_min, r_max, g_min, g_max, b_min, b_max, a_min, a_max, count > 1};
+    QuantBox result = {offset, count, r_min, r_max, g_min,    g_max,
+                       b_min,  b_max, a_min, a_max, count > 1};
     return result;
 }
 
@@ -364,11 +424,13 @@ static int quant_box_longest_channel(const QuantBox *box) {
     };
     int best = 0;
     for (int i = 1; i < 4; ++i)
-        if (ranges[i] > ranges[best]) best = i;
+        if (ranges[i] > ranges[best])
+            best = i;
     return best;
 }
 
-static uint32_t quant_box_average(const uint32_t *pixels, size_t offset, size_t count) {
+static uint32_t quant_box_average(const uint32_t *pixels, size_t offset,
+                                  size_t count) {
     uint64_t a_sum = 0, r_sum = 0, g_sum = 0, b_sum = 0;
     for (size_t i = 0; i < count; ++i) {
         uint32_t p = pixels[offset + i];
@@ -384,7 +446,8 @@ static uint32_t quant_box_average(const uint32_t *pixels, size_t offset, size_t 
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
-static int quantize(uint32_t *pixels, size_t count, int maximum, uint32_t *palette) {
+static int quantize(uint32_t *pixels, size_t count, int maximum,
+                    uint32_t *palette) {
     QuantBox boxes[256];
     int box_count = 1;
     boxes[0] = quant_box_make(pixels, 0, count);
@@ -392,33 +455,49 @@ static int quantize(uint32_t *pixels, size_t count, int maximum, uint32_t *palet
         int target = -1;
         uint64_t best = 0;
         for (int i = 0; i < box_count; ++i) {
-            if (boxes[i].count <= 1) continue;
+            if (boxes[i].count <= 1)
+                continue;
             unsigned range = 0;
             unsigned r_range = boxes[i].r_max - boxes[i].r_min;
             unsigned g_range = boxes[i].g_max - boxes[i].g_min;
             unsigned b_range = boxes[i].b_max - boxes[i].b_min;
             unsigned a_range = boxes[i].a_max - boxes[i].a_min;
-            if (r_range > range) range = r_range;
-            if (g_range > range) range = g_range;
-            if (b_range > range) range = b_range;
-            if (a_range > range) range = a_range;
+            if (r_range > range)
+                range = r_range;
+            if (g_range > range)
+                range = g_range;
+            if (b_range > range)
+                range = b_range;
+            if (a_range > range)
+                range = a_range;
             uint64_t score = (uint64_t)boxes[i].count * range;
-            if (score > best) { best = score; target = i; }
+            if (score > best) {
+                best = score;
+                target = i;
+            }
         }
-        if (target < 0) break;
+        if (target < 0)
+            break;
         QuantBox box = boxes[target];
         int channel = quant_box_longest_channel(&box);
         static const unsigned shifts[4] = {16, 8, 0, 24};
         quant_box_sort_channel = channel;
-        qsort(pixels + box.offset, box.count, sizeof(uint32_t), quant_box_compare);
+        qsort(pixels + box.offset, box.count, sizeof(uint32_t),
+              quant_box_compare);
         size_t split = box.count / 2;
         uint32_t key = (pixels[box.offset + split] >> shifts[channel]) & 255;
         size_t forward = split;
-        while (forward < box.count && ((pixels[box.offset + forward] >> shifts[channel]) & 255) == key) ++forward;
+        while (forward < box.count &&
+               ((pixels[box.offset + forward] >> shifts[channel]) & 255) == key)
+            ++forward;
         size_t backward = split;
-        while (backward > 0 && ((pixels[box.offset + backward - 1] >> shifts[channel]) & 255) == key) --backward;
+        while (backward > 0 &&
+               ((pixels[box.offset + backward - 1] >> shifts[channel]) & 255) ==
+                   key)
+            --backward;
         if (backward > 0 && forward < box.count) {
-            split = (split - backward <= (size_t)forward - split) ? backward : forward;
+            split = (split - backward <= (size_t)forward - split) ? backward
+                                                                  : forward;
         } else if (backward > 0) {
             split = backward;
         } else if (forward < box.count) {
@@ -428,7 +507,8 @@ static int quantize(uint32_t *pixels, size_t count, int maximum, uint32_t *palet
             continue;
         }
         QuantBox left = quant_box_make(pixels, box.offset, split);
-        QuantBox right = quant_box_make(pixels, box.offset + split, box.count - split);
+        QuantBox right =
+            quant_box_make(pixels, box.offset + split, box.count - split);
         if (left.count == 0 || right.count == 0) {
             boxes[target].split_usable = false;
             continue;
@@ -445,22 +525,28 @@ static int quantize(uint32_t *pixels, size_t count, int maximum, uint32_t *palet
     return box_count;
 }
 
-static int nearest_color(uint32_t color, const uint32_t *palette, int count, int start) {
+static int nearest_color(uint32_t color, const uint32_t *palette, int count,
+                         int start) {
     int best = start, distance = INT_MAX;
     for (int i = start; i < count; ++i) {
         int d = 0;
         for (int shift = 0; shift <= 24; shift += 8) {
-            int delta = (int)((color >> shift) & 255) - (int)((palette[i] >> shift) & 255);
+            int delta = (int)((color >> shift) & 255) -
+                        (int)((palette[i] >> shift) & 255);
             d += delta * delta;
         }
-        if (d < distance) { distance = d; best = i; }
+        if (d < distance) {
+            distance = d;
+            best = i;
+        }
     }
     return best;
 }
 
 ClutImage make_clut(const char *name, const Image *image, bool force4) {
     size_t count = pixel_count(image->width, image->height);
-    if (!name || !image->pixels) fail("CLUT: missing name or pixels");
+    if (!name || !image->pixels)
+        fail("CLUT: missing name or pixels");
     uint32_t unique[257];
     uint32_t unique_keys[1024] = {0};
     bool unique_occupied[1024] = {0};
@@ -468,10 +554,13 @@ ClutImage make_clut(const char *name, const Image *image, bool force4) {
     bool transparent = false;
     for (size_t i = 0; i < count; ++i) {
         uint32_t p = image->pixels[i] >> 24 ? image->pixels[i] : 0;
-        if (!p) transparent = true;
-        if (unique_count > 256) continue;
+        if (!p)
+            transparent = true;
+        if (unique_count > 256)
+            continue;
         size_t slot = (p * UINT32_C(2654435761)) >> 22;
-        while (unique_occupied[slot] && unique_keys[slot] != p) slot = (slot + 1) & 1023;
+        while (unique_occupied[slot] && unique_keys[slot] != p)
+            slot = (slot + 1) & 1023;
         if (!unique_occupied[slot]) {
             unique_occupied[slot] = true;
             unique_keys[slot] = p;
@@ -480,7 +569,8 @@ ClutImage make_clut(const char *name, const Image *image, bool force4) {
     }
     ClutImage result = {0};
     result.name = copy_string(name);
-    result.width = image->width; result.height = image->height;
+    result.width = image->width;
+    result.height = image->height;
     result.bpp = force4 || unique_count <= 16 ? 4 : 8;
     result.group = -1;
     result.indices = allocate(count, 1);
@@ -493,7 +583,8 @@ ClutImage make_clut(const char *name, const Image *image, bool force4) {
         uint32_t *visible = allocate(count, sizeof(uint32_t));
         size_t visible_count = 0;
         for (size_t i = 0; i < count; ++i)
-            if (image->pixels[i] >> 24) visible[visible_count++] = image->pixels[i];
+            if (image->pixels[i] >> 24)
+                visible[visible_count++] = image->pixels[i];
         result.used = transparent ? 1 : 0;
         if (visible_count)
             result.used += quantize(visible, visible_count, slots - result.used,
@@ -501,23 +592,32 @@ ClutImage make_clut(const char *name, const Image *image, bool force4) {
         free(visible);
     }
     qsort(result.palette, (size_t)result.used, sizeof(uint32_t), compare_color);
-    typedef struct { uint32_t color; int index_plus_one; } Cache;
+    typedef struct {
+        uint32_t color;
+        int index_plus_one;
+    } Cache;
     Cache *cache = quantized ? allocate(4096, sizeof(Cache)) : NULL;
-    if (cache) memset(cache, 0, 4096 * sizeof(Cache));
+    if (cache)
+        memset(cache, 0, 4096 * sizeof(Cache));
     for (size_t i = 0; i < count; ++i) {
         uint32_t p = image->pixels[i] >> 24 ? image->pixels[i] : 0;
         int index;
-        if (!quantized) index = color_index(result.palette, result.used, p);
-        else if (!p) index = 0;
+        if (!quantized)
+            index = color_index(result.palette, result.used, p);
+        else if (!p)
+            index = 0;
         else {
             Cache *entry = &cache[((p * UINT32_C(2654435761)) >> 20) & 4095];
-            if (entry->index_plus_one && entry->color == p) index = entry->index_plus_one - 1;
+            if (entry->index_plus_one && entry->color == p)
+                index = entry->index_plus_one - 1;
             else {
-                index = nearest_color(p, result.palette, result.used, transparent ? 1 : 0);
+                index = nearest_color(p, result.palette, result.used,
+                                      transparent ? 1 : 0);
                 *entry = (Cache){p, index + 1};
             }
         }
-        if (index < 0) fail("CLUT: internal palette mapping failure");
+        if (index < 0)
+            fail("CLUT: internal palette mapping failure");
         result.indices[i] = (uint8_t)index;
     }
     free(cache);
@@ -525,7 +625,8 @@ ClutImage make_clut(const char *name, const Image *image, bool force4) {
 }
 
 void free_clut(ClutImage *image) {
-    if (!image) return;
+    if (!image)
+        return;
     free(image->name);
     free(image->indices);
     *image = (ClutImage){0};
@@ -534,52 +635,62 @@ void free_clut(ClutImage *image) {
 static void validate_clut(const ClutImage *image) {
     size_t count = pixel_count(image->width, image->height);
     int slots = image->bpp == 4 ? 16 : 256;
-    if ((image->bpp != 4 && image->bpp != 8) ||
-        image->used <= 0 || image->used > slots || (!image->indices && !image->storage))
+    if ((image->bpp != 4 && image->bpp != 8) || image->used <= 0 ||
+        image->used > slots || (!image->indices && !image->storage))
         fail("CLUT: invalid palette image");
     for (int i = 1; i < image->used; ++i)
-        if (image->palette[i - 1] > image->palette[i]) fail("CLUT: palette is not sorted");
+        if (image->palette[i - 1] > image->palette[i])
+            fail("CLUT: palette is not sorted");
     if (image->indices) {
         for (size_t i = 0; i < count; ++i)
-            if (image->indices[i] >= image->used) fail("CLUT: pixel index outside palette");
-    } else if (image->storage_offset<0 || image->stored_used<=0 || image->stored_used>slots)
+            if (image->indices[i] >= image->used)
+                fail("CLUT: pixel index outside palette");
+    } else if (image->storage_offset < 0 || image->stored_used <= 0 ||
+               image->stored_used > slots)
         fail("CLUT: invalid spooled palette image");
 }
 
 void spool_clut(ClutImage *image, FILE *storage) {
-    if (!storage || image->storage || !image->indices) fail("CLUT: invalid pixel spool");
+    if (!storage || image->storage || !image->indices)
+        fail("CLUT: invalid pixel spool");
     validate_clut(image);
-    size_t count=pixel_count(image->width,image->height);
-    off_t offset=ftello(storage);
-    if (offset<0) fail("cannot tell texture pixel spool position: %s",strerror(errno));
-    if (fwrite(image->indices,1,count,storage)!=count)
-        fail("cannot write texture pixel spool: %s",strerror(errno));
-    image->storage=storage;
-    image->storage_offset=offset;
-    image->stored_used=image->used;
-    for (int i=0;i<image->used;++i) image->remap[i]=(uint8_t)i;
+    size_t count = pixel_count(image->width, image->height);
+    off_t offset = ftello(storage);
+    if (offset < 0)
+        fail("cannot tell texture pixel spool position: %s", strerror(errno));
+    if (fwrite(image->indices, 1, count, storage) != count)
+        fail("cannot write texture pixel spool: %s", strerror(errno));
+    image->storage = storage;
+    image->storage_offset = offset;
+    image->stored_used = image->used;
+    for (int i = 0; i < image->used; ++i)
+        image->remap[i] = (uint8_t)i;
     free(image->indices);
-    image->indices=NULL;
+    image->indices = NULL;
 }
 
 uint8_t *read_clut_indices(const ClutImage *image) {
-    if (!image->storage) fail("CLUT: image has no pixel spool");
-    size_t count=pixel_count(image->width,image->height);
-    if (fseeko(image->storage,image->storage_offset,SEEK_SET))
-        fail("cannot seek texture pixel spool: %s",strerror(errno));
-    uint8_t *indices=allocate(count,1);
-    if (fread(indices,1,count,image->storage)!=count) {
-        if (ferror(image->storage)) fail("cannot read texture pixel spool: %s",strerror(errno));
+    if (!image->storage)
+        fail("CLUT: image has no pixel spool");
+    size_t count = pixel_count(image->width, image->height);
+    if (fseeko(image->storage, image->storage_offset, SEEK_SET))
+        fail("cannot seek texture pixel spool: %s", strerror(errno));
+    uint8_t *indices = allocate(count, 1);
+    if (fread(indices, 1, count, image->storage) != count) {
+        if (ferror(image->storage))
+            fail("cannot read texture pixel spool: %s", strerror(errno));
         fail("truncated texture pixel spool");
     }
-    for (size_t i=0;i<count;++i) {
-        if (indices[i]>=image->stored_used) fail("CLUT: spooled pixel index outside palette");
-        indices[i]=image->remap[indices[i]];
+    for (size_t i = 0; i < count; ++i) {
+        if (indices[i] >= image->stored_used)
+            fail("CLUT: spooled pixel index outside palette");
+        indices[i] = image->remap[indices[i]];
     }
     return indices;
 }
 
-static int palette_union(const ClutGroup *a, const ClutGroup *b, uint32_t *out) {
+static int palette_union(const ClutGroup *a, const ClutGroup *b,
+                         uint32_t *out) {
     int ai = 0, bi = 0, n = 0;
     while (ai < a->used || bi < b->used) {
         uint32_t value;
@@ -587,24 +698,31 @@ static int palette_union(const ClutGroup *a, const ClutGroup *b, uint32_t *out) 
             value = a->palette[ai++];
         else if (ai == a->used || b->palette[bi] < a->palette[ai])
             value = b->palette[bi++];
-        else { value = a->palette[ai++]; ++bi; }
-        if (!n || out[n - 1] != value) out[n++] = value;
+        else {
+            value = a->palette[ai++];
+            ++bi;
+        }
+        if (!n || out[n - 1] != value)
+            out[n++] = value;
     }
     return n;
 }
 
 static void remap_clut(ClutImage *image, const ClutGroup *group) {
-    uint8_t remap[256]={0};
+    uint8_t remap[256] = {0};
     for (int i = 0; i < image->used; ++i) {
         int index = color_index(group->palette, group->used, image->palette[i]);
-        if (index < 0) fail("CLUT: merged palette lost a color");
+        if (index < 0)
+            fail("CLUT: merged palette lost a color");
         remap[i] = (uint8_t)index;
     }
     if (image->storage) {
-        for (int i=0;i<image->stored_used;++i) image->remap[i]=remap[image->remap[i]];
+        for (int i = 0; i < image->stored_used; ++i)
+            image->remap[i] = remap[image->remap[i]];
     } else {
         size_t count = pixel_count(image->width, image->height);
-        for (size_t i = 0; i < count; ++i) image->indices[i] = remap[image->indices[i]];
+        for (size_t i = 0; i < count; ++i)
+            image->indices[i] = remap[image->indices[i]];
     }
     memcpy(image->palette, group->palette, sizeof(image->palette));
     image->used = group->used;
@@ -613,7 +731,8 @@ static void remap_clut(ClutImage *image, const ClutGroup *group) {
 
 Groups merge_cluts(ClutImage *images, size_t count) {
     Groups result = {0};
-    if (!count) return result;
+    if (!count)
+        return result;
     if (!images || count > INT_MAX || count > SIZE_MAX / 2)
         fail("CLUT: excessive image count");
     ClutGroup *groups = allocate(count, sizeof(ClutGroup));
@@ -621,7 +740,8 @@ Groups merge_cluts(ClutImage *images, size_t count) {
     size_t *parents = allocate(count, sizeof(size_t));
     size_t table_size = 1;
     while (table_size < count * 2) {
-        if (table_size > SIZE_MAX / 2) fail("CLUT: palette lookup size overflow");
+        if (table_size > SIZE_MAX / 2)
+            fail("CLUT: palette lookup size overflow");
         table_size *= 2;
     }
     size_t *table = allocate(table_size, sizeof(size_t));
@@ -630,7 +750,8 @@ Groups merge_cluts(ClutImage *images, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         validate_clut(&images[i]);
         uint32_t hash = (uint32_t)images[i].used;
-        for (int j = 0; j < images[i].used; ++j) hash = hash * 31 + images[i].palette[j];
+        for (int j = 0; j < images[i].used; ++j)
+            hash = hash * 31 + images[i].palette[j];
         size_t slot = hash & (table_size - 1);
         size_t found = group_count;
         while (table[slot]) {
@@ -665,32 +786,43 @@ Groups merge_cluts(ClutImage *images, size_t count) {
             changed = false;
             size_t n = 0;
             for (size_t i = 0; i < group_count; ++i) {
-                if (!alive[i] || groups[i].bpp != bpp) continue;
+                if (!alive[i] || groups[i].bpp != bpp)
+                    continue;
                 size_t at = n;
                 while (at && groups[order[at - 1]].used > groups[i].used) {
-                    order[at] = order[at - 1]; --at;
+                    order[at] = order[at - 1];
+                    --at;
                 }
-                order[at] = i; ++n;
+                order[at] = i;
+                ++n;
             }
             for (size_t i = 0; i < n; ++i) {
                 size_t a = order[i], partner = SIZE_MAX;
-                if (!alive[a] || groups[a].used >= slots) continue;
+                if (!alive[a] || groups[a].used >= slots)
+                    continue;
                 int best_size = INT_MAX;
                 for (size_t j = 0; j < n; ++j) {
                     size_t b = order[j];
-                    if (a == b || !alive[b]) continue;
+                    if (a == b || !alive[b])
+                        continue;
                     int used = palette_union(&groups[a], &groups[b], combined);
                     if (used <= slots && used < best_size) {
-                        best_size = used; partner = b;
-                        int larger = groups[a].used > groups[b].used ? groups[a].used : groups[b].used;
-                        if (used == larger) break;
+                        best_size = used;
+                        partner = b;
+                        int larger = groups[a].used > groups[b].used
+                                         ? groups[a].used
+                                         : groups[b].used;
+                        if (used == larger)
+                            break;
                     }
                 }
-                if (partner == SIZE_MAX) continue;
+                if (partner == SIZE_MAX)
+                    continue;
                 ClutGroup *target = &groups[partner];
                 int used = palette_union(&groups[a], target, combined);
                 memset(target->palette, 0, sizeof(target->palette));
-                memcpy(target->palette, combined, (size_t)used * sizeof(uint32_t));
+                memcpy(target->palette, combined,
+                       (size_t)used * sizeof(uint32_t));
                 target->used = used;
                 parents[a] = partner;
                 alive[a] = false;
@@ -700,29 +832,34 @@ Groups merge_cluts(ClutImage *images, size_t count) {
     }
     result.items = allocate(group_count, sizeof(ClutGroup));
     int *final_group_for_original = allocate(group_count, sizeof(int));
-    for (size_t i = 0; i < group_count; ++i) final_group_for_original[i] = -1;
+    for (size_t i = 0; i < group_count; ++i)
+        final_group_for_original[i] = -1;
     size_t next = 0;
-    for (size_t i = 0; i < group_count; ++i) if (alive[i] && groups[i].bpp == 4) {
-        result.items[next] = groups[i];
-        result.items[next].id = (int)next;
-        final_group_for_original[i] = (int)next;
-        ++next;
-    }
-    for (size_t i = 0; i < group_count; ++i) if (alive[i] && groups[i].bpp == 8) {
-        result.items[next] = groups[i];
-        result.items[next].id = (int)next;
-        final_group_for_original[i] = (int)next;
-        ++next;
-    }
+    for (size_t i = 0; i < group_count; ++i)
+        if (alive[i] && groups[i].bpp == 4) {
+            result.items[next] = groups[i];
+            result.items[next].id = (int)next;
+            final_group_for_original[i] = (int)next;
+            ++next;
+        }
+    for (size_t i = 0; i < group_count; ++i)
+        if (alive[i] && groups[i].bpp == 8) {
+            result.items[next] = groups[i];
+            result.items[next].id = (int)next;
+            final_group_for_original[i] = (int)next;
+            ++next;
+        }
     result.count = next;
     for (size_t i = 0; i < count; ++i) {
         int orig = images[i].group;
         if (orig < 0 || (size_t)orig >= group_count)
             fail("CLUT: missing final group mapping for image");
-        size_t root=(size_t)orig;
-        while (parents[root]!=root) root=parents[root];
-        parents[orig]=root;
-        if (final_group_for_original[root]<0) fail("CLUT: missing final group mapping for image");
+        size_t root = (size_t)orig;
+        while (parents[root] != root)
+            root = parents[root];
+        parents[orig] = root;
+        if (final_group_for_original[root] < 0)
+            fail("CLUT: missing final group mapping for image");
         images[i].group = final_group_for_original[root];
         remap_clut(&images[i], &result.items[images[i].group]);
     }
@@ -734,12 +871,18 @@ Groups merge_cluts(ClutImage *images, size_t count) {
     return result;
 }
 
-typedef struct { int x, y, width, height; } Rect;
-typedef struct { Rect *items; size_t count, capacity; } Packer;
+typedef struct {
+    int x, y, width, height;
+} Rect;
+typedef struct {
+    Rect *items;
+    size_t count, capacity;
+} Packer;
 
 static void add_rect(Packer *packer, Rect rect) {
     if (packer->count == packer->capacity) {
-        if (packer->capacity > SIZE_MAX / 2) fail("Atlas: free rectangle count overflow");
+        if (packer->capacity > SIZE_MAX / 2)
+            fail("Atlas: free rectangle count overflow");
         size_t capacity = packer->capacity ? packer->capacity * 2 : 16;
         packer->items = resize_array(packer->items, capacity, sizeof(Rect));
         packer->capacity = capacity;
@@ -758,8 +901,8 @@ static Packer clone_packer(const Packer *source) {
 }
 
 static bool contains_rect(Rect a, Rect b) {
-    return a.x <= b.x && a.y <= b.y &&
-           a.x + a.width >= b.x + b.width && a.y + a.height >= b.y + b.height;
+    return a.x <= b.x && a.y <= b.y && a.x + a.width >= b.x + b.width &&
+           a.y + a.height >= b.y + b.height;
 }
 
 static bool insert_rect(Packer *packer, int width, int height, int *x, int *y) {
@@ -767,16 +910,22 @@ static bool insert_rect(Packer *packer, int width, int height, int *x, int *y) {
     size_t best = SIZE_MAX;
     for (size_t i = 0; i < packer->count; ++i) {
         Rect r = packer->items[i];
-        if (width > r.width || height > r.height) continue;
+        if (width > r.width || height > r.height)
+            continue;
         int dw = r.width - width, dh = r.height - height;
         int short_side = dw < dh ? dw : dh, long_side = dw > dh ? dw : dh;
-        if (short_side < best_short || (short_side == best_short && long_side < best_long)) {
-            best = i; best_short = short_side; best_long = long_side;
+        if (short_side < best_short ||
+            (short_side == best_short && long_side < best_long)) {
+            best = i;
+            best_short = short_side;
+            best_long = long_side;
         }
     }
-    if (best == SIZE_MAX) return false;
+    if (best == SIZE_MAX)
+        return false;
     Rect used = {packer->items[best].x, packer->items[best].y, width, height};
-    *x = used.x; *y = used.y;
+    *x = used.x;
+    *y = used.y;
     Packer strips = {0};
     size_t write = 0, original_count = packer->count;
     for (size_t i = 0; i < original_count; ++i) {
@@ -786,15 +935,20 @@ static bool insert_rect(Packer *packer, int width, int height, int *x, int *y) {
             packer->items[write++] = r;
             continue;
         }
-        if (r.x < used.x) add_rect(&strips, (Rect){r.x, r.y, used.x - r.x, r.height});
+        if (r.x < used.x)
+            add_rect(&strips, (Rect){r.x, r.y, used.x - r.x, r.height});
         if (r.x + r.width > used.x + width)
-            add_rect(&strips, (Rect){used.x + width, r.y, r.x + r.width - used.x - width, r.height});
-        if (r.y < used.y) add_rect(&strips, (Rect){r.x, r.y, r.width, used.y - r.y});
+            add_rect(&strips, (Rect){used.x + width, r.y,
+                                     r.x + r.width - used.x - width, r.height});
+        if (r.y < used.y)
+            add_rect(&strips, (Rect){r.x, r.y, r.width, used.y - r.y});
         if (r.y + r.height > used.y + height)
-            add_rect(&strips, (Rect){r.x, used.y + height, r.width, r.y + r.height - used.y - height});
+            add_rect(&strips, (Rect){r.x, used.y + height, r.width,
+                                     r.y + r.height - used.y - height});
     }
     packer->count = write;
-    for (size_t i = 0; i < strips.count; ++i) add_rect(packer, strips.items[i]);
+    for (size_t i = 0; i < strips.count; ++i)
+        add_rect(packer, strips.items[i]);
     free(strips.items);
     /* Preserve Kotlin's in-place pruning order, including its tie behavior. */
     size_t size = packer->count;
@@ -803,8 +957,12 @@ static bool insert_rect(Packer *packer, int width, int height, int *x, int *y) {
         bool contained = false;
         Rect r = packer->items[i];
         for (size_t j = 0; j < size; ++j)
-            if (i != j && contains_rect(packer->items[j], r)) { contained = true; break; }
-        if (!contained) packer->items[write++] = r;
+            if (i != j && contains_rect(packer->items[j], r)) {
+                contained = true;
+                break;
+            }
+        if (!contained)
+            packer->items[write++] = r;
     }
     packer->count = write;
     return true;
@@ -821,11 +979,13 @@ static int longest_side(const ClutImage *image) {
 }
 
 static void add_placement(Atlas *atlas, Placement placement) {
-    atlas->entries = resize_array(atlas->entries, atlas->count + 1, sizeof(Placement));
+    atlas->entries =
+        resize_array(atlas->entries, atlas->count + 1, sizeof(Placement));
     atlas->entries[atlas->count++] = placement;
 }
 
-Atlases pack_atlases(const ClutImage *images, const char *const *keys, size_t count, int size) {
+Atlases pack_atlases(const ClutImage *images, const char *const *keys,
+                     size_t count, int size) {
     Atlases result = {0};
     pixel_count(size, size);
     if (count > INT_MAX || (count && !images))
@@ -842,25 +1002,31 @@ Atlases pack_atlases(const ClutImage *images, const char *const *keys, size_t co
         PackGroup *groups = allocate(count, sizeof(PackGroup));
         size_t group_count = 0;
         for (size_t i = 0; i < count; ++i) {
-            if (images[i].bpp != bpp) continue;
+            if (images[i].bpp != bpp)
+                continue;
             const char *key = keys && keys[i] ? keys[i] : images[i].name;
-            if (!key) fail("Atlas: missing grouping key");
+            if (!key)
+                fail("Atlas: missing grouping key");
             size_t g = 0;
-            while (g < group_count && strcmp(groups[g].key, key)) ++g;
+            while (g < group_count && strcmp(groups[g].key, key))
+                ++g;
             if (g == group_count) {
                 groups[g] = (PackGroup){.key = key};
                 ++group_count;
             }
             PackGroup *group = &groups[g];
-            group->images = resize_array(group->images, group->count + 1, sizeof(size_t));
+            group->images =
+                resize_array(group->images, group->count + 1, sizeof(size_t));
             group->images[group->count++] = i;
-            group->area += (uint64_t)images[i].width * (unsigned)images[i].height;
+            group->area +=
+                (uint64_t)images[i].width * (unsigned)images[i].height;
         }
         for (size_t i = 1; i < group_count; ++i) {
             PackGroup group = groups[i];
             size_t j = i;
             while (j && groups[j - 1].area < group.area) {
-                groups[j] = groups[j - 1]; --j;
+                groups[j] = groups[j - 1];
+                --j;
             }
             groups[j] = group;
         }
@@ -868,27 +1034,33 @@ Atlases pack_atlases(const ClutImage *images, const char *const *keys, size_t co
             PackGroup *group = &groups[g];
             for (size_t i = 1; i < group->count; ++i) {
                 size_t image = group->images[i], j = i;
-                while (j && longest_side(&images[group->images[j - 1]]) < longest_side(&images[image])) {
-                    group->images[j] = group->images[j - 1]; --j;
+                while (j && longest_side(&images[group->images[j - 1]]) <
+                                longest_side(&images[image])) {
+                    group->images[j] = group->images[j - 1];
+                    --j;
                 }
                 group->images[j] = image;
             }
             Placement *placements = allocate(group->count, sizeof(Placement));
             bool packed = false;
             for (size_t i = 0; i < result.count; ++i) {
-                if (result.items[i].bpp != bpp) continue;
+                if (result.items[i].bpp != bpp)
+                    continue;
                 Packer trial = clone_packer(&packers[i]);
                 size_t j;
                 for (j = 0; j < group->count; ++j) {
                     size_t image = group->images[j];
                     placements[j].image = image;
-                    if (!insert_rect(&trial, images[image].width, images[image].height,
-                                     &placements[j].x, &placements[j].y)) break;
+                    if (!insert_rect(&trial, images[image].width,
+                                     images[image].height, &placements[j].x,
+                                     &placements[j].y))
+                        break;
                 }
                 if (j == group->count) {
                     free(packers[i].items);
                     packers[i] = trial;
-                    for (j = 0; j < group->count; ++j) add_placement(&result.items[i], placements[j]);
+                    for (j = 0; j < group->count; ++j)
+                        add_placement(&result.items[i], placements[j]);
                     packed = true;
                     break;
                 }
@@ -897,22 +1069,31 @@ Atlases pack_atlases(const ClutImage *images, const char *const *keys, size_t co
             if (!packed) {
                 size_t remaining = group->count;
                 while (remaining) {
-                    if (result.count >= INT_MAX) fail("Atlas: excessive atlas count");
-                    Atlas atlas = {.id = (int)result.count, .bpp = bpp, .width = size, .height = size};
+                    if (result.count >= INT_MAX)
+                        fail("Atlas: excessive atlas count");
+                    Atlas atlas = {.id = (int)result.count,
+                                   .bpp = bpp,
+                                   .width = size,
+                                   .height = size};
                     Packer packer = {0};
                     add_rect(&packer, (Rect){0, 0, size, size});
                     size_t write = 0;
                     for (size_t i = 0; i < remaining; ++i) {
                         size_t image = group->images[i];
                         Placement placement = {.image = image};
-                        if (insert_rect(&packer, images[image].width, images[image].height,
-                                        &placement.x, &placement.y))
+                        if (insert_rect(&packer, images[image].width,
+                                        images[image].height, &placement.x,
+                                        &placement.y))
                             add_placement(&atlas, placement);
-                        else group->images[write++] = image;
+                        else
+                            group->images[write++] = image;
                     }
-                    if (!atlas.count) fail("Atlas: could not pack remaining images");
-                    result.items = resize_array(result.items, result.count + 1, sizeof(Atlas));
-                    packers = resize_array(packers, result.count + 1, sizeof(Packer));
+                    if (!atlas.count)
+                        fail("Atlas: could not pack remaining images");
+                    result.items = resize_array(result.items, result.count + 1,
+                                                sizeof(Atlas));
+                    packers =
+                        resize_array(packers, result.count + 1, sizeof(Packer));
                     result.items[result.count] = atlas;
                     packers[result.count++] = packer;
                     remaining = write;
@@ -923,14 +1104,17 @@ Atlases pack_atlases(const ClutImage *images, const char *const *keys, size_t co
         }
         free(groups);
     }
-    for (size_t i = 0; i < result.count; ++i) free(packers[i].items);
+    for (size_t i = 0; i < result.count; ++i)
+        free(packers[i].items);
     free(packers);
     return result;
 }
 
 void free_atlases(Atlases *atlases) {
-    if (!atlases) return;
-    for (size_t i = 0; i < atlases->count; ++i) free(atlases->items[i].entries);
+    if (!atlases)
+        return;
+    for (size_t i = 0; i < atlases->count; ++i)
+        free(atlases->items[i].entries);
     free(atlases->items);
     *atlases = (Atlases){0};
 }

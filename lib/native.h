@@ -9,8 +9,14 @@
 #include <stdio.h>
 #include <sys/types.h>
 
-typedef struct { uint8_t *data; size_t size, capacity; } Buffer;
-typedef struct { const uint8_t *data; size_t size; } Slice;
+typedef struct {
+    uint8_t *data;
+    size_t size, capacity;
+} Buffer;
+typedef struct {
+    const uint8_t *data;
+    size_t size;
+} Slice;
 extern bool bspp_verbose;
 _Noreturn void fail(const char *format, ...);
 void *allocate(size_t count, size_t size);
@@ -33,7 +39,10 @@ int32_t i32(Slice s, size_t at);
 float f32(Slice s, size_t at);
 Slice section(Slice s, size_t at, size_t size);
 
-typedef struct { int width, height; uint32_t *pixels; } Image;
+typedef struct {
+    int width, height;
+    uint32_t *pixels;
+} Image;
 Image decode_image(Slice data, bool gm2022_5);
 void save_png(const char *path, const Image *image);
 void free_image(Image *image);
@@ -49,31 +58,53 @@ typedef struct {
     int stored_used;
     uint8_t remap[256];
 } ClutImage;
-typedef struct { int id, bpp, used; uint32_t palette[256]; } ClutGroup;
-typedef struct { ClutGroup *items; size_t count; } Groups;
+typedef struct {
+    int id, bpp, used;
+    uint32_t palette[256];
+} ClutGroup;
+typedef struct {
+    ClutGroup *items;
+    size_t count;
+} Groups;
 ClutImage make_clut(const char *name, const Image *image, bool force4);
 Groups merge_cluts(ClutImage *images, size_t count);
 void spool_clut(ClutImage *image, FILE *storage);
 uint8_t *read_clut_indices(const ClutImage *image);
 void free_clut(ClutImage *image);
-typedef struct { size_t image; int x, y; } Placement;
+typedef struct {
+    size_t image;
+    int x, y;
+} Placement;
 typedef struct {
     int id, bpp, width, height;
     Placement *entries;
     size_t count;
 } Atlas;
-typedef struct { Atlas *items; size_t count; } Atlases;
+typedef struct {
+    Atlas *items;
+    size_t count;
+} Atlases;
 Atlases pack_atlases(const ClutImage *images, const char *const *keys,
-                    size_t count, int size);
+                     size_t count, int size);
 void free_atlases(Atlases *atlases);
 
 typedef struct {
     uint32_t offset;
     int sx, sy, sw, sh, tx, ty, tw, th, bw, bh, page;
 } Tpag;
-typedef struct { char *name; uint32_t *textures; size_t count; } Sprite;
-typedef struct { char *name; uint32_t texture; } NamedTexture;
-typedef struct { bool sprite; int definition, x, y, width, height; } Tile;
+typedef struct {
+    char *name;
+    uint32_t *textures;
+    size_t count;
+} Sprite;
+typedef struct {
+    char *name;
+    uint32_t texture;
+} NamedTexture;
+typedef struct {
+    bool sprite;
+    int definition, x, y, width, height;
+} Tile;
 typedef struct {
     char *name, *file;
     uint32_t flags;
@@ -84,19 +115,28 @@ typedef struct {
     Buffer source;
     bool source_mapped;
     int version[4], bytecode;
-    Tpag *tpags; size_t tpag_count;
-    Slice *textures; size_t texture_count;
-    Sprite *sprites; size_t sprite_count;
-    NamedTexture *backgrounds; size_t background_count;
-    NamedTexture *fonts; size_t font_count;
-    Tile *tiles; size_t tile_count;
-    Sound *sounds; size_t sound_count;
-    Slice *audio; size_t audio_count;
+    Tpag *tpags;
+    size_t tpag_count;
+    Slice *textures;
+    size_t texture_count;
+    Sprite *sprites;
+    size_t sprite_count;
+    NamedTexture *backgrounds;
+    size_t background_count;
+    NamedTexture *fonts;
+    size_t font_count;
+    Tile *tiles;
+    size_t tile_count;
+    Sound *sounds;
+    size_t sound_count;
+    Slice *audio;
+    size_t audio_count;
 } DataWin;
 DataWin parse_datawin(Buffer source, bool audio_only, bool ps3);
 DataWin load_datawin(const char *path, bool audio_only, bool ps3);
 void free_datawin(DataWin *dw);
-bool version_at_least(const DataWin *dw, int major, int minor, int release, int build);
+bool version_at_least(const DataWin *dw, int major, int minor, int release,
+                      int build);
 int resolve_tpag(const DataWin *dw, uint32_t offset);
 Image extract_tpag(const Tpag *tpag, const Image *pages, size_t page_count);
 void process_audio(const DataWin *dw, const char *input_directory,
