@@ -160,24 +160,23 @@ static char *tile_name(const DataWin *dw,const Tile *t,bool key) {
     free(fallback);
     return out;
 }
-static Assets collect(const Options *o,const DataWin *dw,const Image *pages) {
-    Assets a={0};
-    if (o->debug) {
-        const char *dirs[]={"sprites","backgrounds","fonts","tiles","atlas_debug"};
-        for (size_t i=0;i<5;++i) { char *path=join_path(o->debug,dirs[i]); mkdirs(path); free(path); }
-    }
+static void collect_page_assets(Assets *a,const Options *o,const DataWin *dw,Image *pages,size_t page_index) {
+    if (page_index>=dw->texture_count) return;
+    if (!pages[page_index].pixels && dw->textures[page_index].size)
+        pages[page_index]=decode_image(dw->textures[page_index],version_at_least(dw,2022,5,0,0));
+    if (!pages[page_index].pixels) return;
     for (size_t i=0;i<dw->sprite_count;++i) {
         const Sprite *sp=&dw->sprites[i];
         char *owned;
         const char *n=name_or(sp->name,"sprite_",i,&owned);
         for (size_t j=0;j<sp->count;++j) {
             int index=resolve_tpag(dw,sp->textures[j]);
-            if (index<0) continue;
+            if (index<0 || dw->tpags[index].page!=(int)page_index) continue;
             Image img=extract_tpag(&dw->tpags[index],pages,dw->texture_count);
             char *name=sp->count>1 ? format_string("%s_%zu",n,j):copy_string(n);
             debug_tpag(o,"sprites",name,&dw->tpags[index],pages,dw->texture_count);
             char *full=format_string("spr/%s",name);
-            add_asset(&a,full,sprite_key(n),img,index);
+            add_asset(a,full,sprite_key(n),img,index);
             free(name);
         }
         free(owned);
@@ -187,20 +186,20 @@ static Assets collect(const Options *o,const DataWin *dw,const Image *pages) {
         size_t count=which ? dw->font_count:dw->background_count;
         for (size_t i=0;i<count;++i) {
             int index=resolve_tpag(dw,items[i].texture);
-            if (index<0) continue;
+            if (index<0 || dw->tpags[index].page!=(int)page_index) continue;
             char *owned;
             const char *n=name_or(items[i].name,which?"font_":"bg_",i,&owned);
             Image img=extract_tpag(&dw->tpags[index],pages,dw->texture_count);
             debug_tpag(o,which?"fonts":"backgrounds",n,&dw->tpags[index],pages,dw->texture_count);
             char *name=format_string("%s/%s",which?"font":"bg",n);
-            add_asset(&a,name,copy_string(name),img,index);
+            add_asset(a,name,copy_string(name),img,index);
             free(owned);
         }
     }
     for (size_t i=0;i<dw->tile_count;++i) {
         const Tile *t=&dw->tiles[i];
         int index=tile_tpag(dw,t);
-        if (index<0 || t->x<0 || t->y<0 || t->width<=0 || t->height<=0) continue;
+        if (index<0 || t->x<0 || t->y<0 || t->width<=0 || t->height<=0 || dw->tpags[index].page!=(int)page_index) continue;
         Image source=extract_tpag(&dw->tpags[index],pages,dw->texture_count);
         if (t->x>=source.width || t->y>=source.height) { free_image(&source); continue; }
         int w=t->width<source.width-t->x ? t->width:source.width-t->x;
@@ -209,8 +208,46 @@ static Assets collect(const Options *o,const DataWin *dw,const Image *pages) {
         free_image(&source);
         char *name=tile_name(dw,t,false);
         debug_png(o,"tiles",name+5,&img);
-        add_asset(&a,name,tile_name(dw,t,true),img,-1);
+        add_asset(a,name,tile_name(dw,t,true),img,-1);
     }
+}
+
+static Assets collect(const Options *o,const DataWin *dw,Image *pages) {
+    Assets a={0};
+    if (o->debug) {
+        const char *dirs[]={"sprites","backgrounds","fonts","tiles","atlas_debug"};
+        for (size_t i=0;i<5;++i) { char *path=join_path(o->debug,dirs[i]); mkdirs(path); free(path); }
+    }
+    bool *used=allocate(dw->texture_count,sizeof *used);
+    for (size_t i=0;i<dw->sprite_count;++i) {
+        const Sprite *sp=&dw->sprites[i];
+        for (size_t j=0;j<sp->count;++j) {
+            int index=resolve_tpag(dw,sp->textures[j]);
+            if (index>=0 && dw->tpags[index].page>=0 && (size_t)dw->tpags[index].page<dw->texture_count)
+                used[(size_t)dw->tpags[index].page]=true;
+        }
+    }
+    for (int which=0;which<2;++which) {
+        const NamedTexture *items=which ? dw->fonts:dw->backgrounds;
+        size_t count=which ? dw->font_count:dw->background_count;
+        for (size_t i=0;i<count;++i) {
+            int index=resolve_tpag(dw,items[i].texture);
+            if (index>=0 && dw->tpags[index].page>=0 && (size_t)dw->tpags[index].page<dw->texture_count)
+                used[(size_t)dw->tpags[index].page]=true;
+        }
+    }
+    for (size_t i=0;i<dw->tile_count;++i) {
+        const Tile *t=&dw->tiles[i];
+        int index=tile_tpag(dw,t);
+        if (index>=0 && dw->tpags[index].page>=0 && (size_t)dw->tpags[index].page<dw->texture_count)
+            used[(size_t)dw->tpags[index].page]=true;
+    }
+    for (size_t i=0;i<dw->texture_count;++i) {
+        if (!used[i]) continue;
+        collect_page_assets(&a,o,dw,pages,i);
+        free_image(&pages[i]);
+    }
+    free(used);
     for (size_t i=0;i<a.count;++i) prepare_asset(&a.items[i],o->atlas_size);
     return a;
 }
@@ -440,8 +477,10 @@ void process(const Options *o) {
     DataWin dw=parse_datawin(read_file(o->input),false,o->ps3);
     mkdirs(o->output);
     Image *pages=allocate(dw.texture_count,sizeof *pages);
-    for (size_t i=0;i<dw.texture_count;++i)
-        if (dw.textures[i].size) pages[i]=decode_image(dw.textures[i],version_at_least(&dw,2022,5,0,0));
+    if (o->ps3) {
+        for (size_t i=0;i<dw.texture_count;++i)
+            if (dw.textures[i].size) pages[i]=decode_image(dw.textures[i],version_at_least(&dw,2022,5,0,0));
+    }
     if (o->ps3) ps3(o,&dw,pages);
     else ps2(o,&dw,pages);
     for (size_t i=0;i<dw.texture_count;++i) free_image(&pages[i]);
