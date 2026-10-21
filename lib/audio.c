@@ -17,8 +17,8 @@ typedef struct {
     uint32_t rate, count, offset;
     Buffer bytes;
 } Audio;
-typedef struct { char *name; Buffer bytes; } External;
-typedef struct { int id; DataWin dw; } AudioGroup;
+typedef struct { char *name, *path; bool consumed; } External;
+typedef struct { int id; char *path; } AudioGroup;
 typedef struct { char *path; Audio audio; } Music;
 typedef struct {
     External *external; size_t external_count;
@@ -95,14 +95,13 @@ static void scan_directory(Files *files, const char *root, const char *relative,
                         fail("Ambiguous duplicate audiogroup %d: %s", id, path);
                 files->groups = resize_array(files->groups, files->group_count + 1,
                                              sizeof(*files->groups));
-                if (bspp_verbose) fprintf(stderr, "Parsing %s\n", path);
                 files->groups[files->group_count++] =
-                    (AudioGroup){id, parse_datawin(read_file(path), true, false)};
+                    (AudioGroup){id, copy_string(path)};
             } else if (!*relative && (extension(names[i], ".wav") || extension(names[i], ".ogg"))) {
                 files->external = resize_array(files->external, files->external_count + 1,
                                                sizeof(*files->external));
                 files->external[files->external_count++] =
-                    (External){copy_string(names[i]), read_file(path)};
+                    (External){copy_string(names[i]), copy_string(path), false};
             } else if (*relative && extension(names[i], ".ogg")) {
                 if (strlen(rel) > UINT8_MAX)
                     fail("Music path exceeds 255 UTF-8 bytes: %s", rel);
@@ -162,7 +161,6 @@ static Audio convert_pcm(int16_t *pcm, size_t sample_count, unsigned rate, unsig
     double ratio = rate > 22050 ? (double)rate / 22050.0 : 1.0;
     size_t output_frames = rate > 22050 ? (size_t)(frames / ratio) : frames;
     if (output_frames > UINT32_MAX) fail("Audio sample count exceeds 32-bit range");
-    int16_t *mono = allocate(output_frames, sizeof(*mono));
     for (size_t f = 0; f < output_frames; ++f) {
         double position = f * ratio;
         size_t source = rate > 22050 ? (size_t)position : f;
@@ -179,12 +177,11 @@ static Audio convert_pcm(int16_t *pcm, size_t sample_count, unsigned rate, unsig
             }
             sum += value;
         }
-        mono[f] = (int16_t)(sum / (int)channels);
+        pcm[f] = (int16_t)(sum / (int)channels);
     }
-    free(pcm);
     Audio result = {true, rate > 22050 ? 22050 : rate, (uint32_t)output_frames, 0,
-                    encode_adpcm(mono, output_frames)};
-    free(mono);
+                    encode_adpcm(pcm, output_frames)};
+    free(pcm);
     return result;
 }
 
@@ -289,20 +286,28 @@ static Audio decode_ogg(Slice data, const char *label) {
     }
     if (total>INT_MAX/channels) fail("Vorbis sample allocation exceeds decoder limit: %s",label);
     size_t capacity=(size_t)total*channels;
-    float *samples=allocate(capacity,sizeof *samples);
-    int frames=stb_vorbis_get_samples_float_interleaved(vf,(int)channels,samples,(int)capacity);
+    size_t chunk_capacity=(size_t)1024*channels;
+    float *samples=allocate(chunk_capacity,sizeof *samples);
+    int16_t *pcm=allocate(capacity,sizeof *pcm);
+    size_t count=0;
+    while (count<capacity) {
+        size_t remaining=capacity-count;
+        int frames=stb_vorbis_get_samples_float_interleaved(vf,(int)channels,samples,
+                   (int)(remaining<chunk_capacity ? remaining:chunk_capacity));
+        if (frames<=0) break;
+        size_t n=(size_t)frames*channels;
+        for (size_t i=0;i<n;++i) {
+            float value=samples[i];
+            if (!isfinite(value)) fail("Non-finite Vorbis PCM sample: %s",label);
+            if (value < -1.0f) value=-1.0f;
+            if (value > 1.0f) value=1.0f;
+            pcm[count+i]=(int16_t)(int)(value*32767.0f);
+        }
+        count+=n;
+    }
     error=stb_vorbis_get_error(vf);
     stb_vorbis_close(vf);
-    if (error || frames<=0) fail("Corrupt Vorbis sample data: %s (decoder error %d)",label,error);
-    size_t count=(size_t)frames*channels;
-    int16_t *pcm=allocate(count,sizeof *pcm);
-    for (size_t i=0;i<count;++i) {
-        float value=samples[i];
-        if (!isfinite(value)) fail("Non-finite Vorbis PCM sample: %s",label);
-        if (value < -1.0f) value=-1.0f;
-        if (value > 1.0f) value=1.0f;
-        pcm[i]=(int16_t)(int)(value*32767.0f);
-    }
+    if (error || !count) fail("Corrupt Vorbis sample data: %s (decoder error %d)",label,error);
     free(samples);
     return convert_pcm(pcm,count,rate,channels);
 }
@@ -325,12 +330,14 @@ static size_t append_audio(Audio **items, size_t *count, Audio audio) {
     return (*count)++;
 }
 
-static void append_samples(Buffer *sounds, Audio *audio) {
+static void append_samples(FILE *sounds, size_t *size, Audio *audio) {
     if (!audio->valid) return;
-    if (sounds->size > UINT32_MAX || audio->bytes.size > UINT32_MAX - sounds->size)
+    if (*size > UINT32_MAX || audio->bytes.size > UINT32_MAX - *size)
         fail("SOUNDS.BIN exceeds 32-bit offsets");
-    audio->offset = (uint32_t)sounds->size;
-    append(sounds, audio->bytes.data, audio->bytes.size);
+    audio->offset = (uint32_t)*size;
+    if (audio->bytes.size && fwrite(audio->bytes.data,1,audio->bytes.size,sounds)!=audio->bytes.size)
+        fail("Cannot write SOUNDS.BIN: %s",strerror(errno));
+    *size += audio->bytes.size;
 }
 
 static void free_audio_bytes(Audio *audio) {
@@ -347,9 +354,10 @@ static int32_t kotlin_int(float value) {
 }
 
 void process_audio(const DataWin *dw, const char *input_directory,
-                   Buffer *sound_bank, Buffer *sounds) {
+                   Buffer *sound_bank, FILE *sounds) {
     if (bspp_verbose) fprintf(stderr, "Audio: processing from directory %s\n", input_directory);
-    if (sound_bank->size || sounds->size) fail("Audio output buffers must initially be empty");
+    if (sound_bank->size) fail("Sound bank buffer must initially be empty");
+    size_t sounds_size=0;
     count16(dw->audio_count, "embedded AUDO entries");
     count16(dw->sound_count, "SOND entries");
     Files files = {0};
@@ -365,17 +373,30 @@ void process_audio(const DataWin *dw, const char *input_directory,
         audio[i] = decode_audio(dw->audio[i], label);
         free(label);
         if (audio[i].valid) {
-            append_samples(sounds, &audio[i]);
+            append_samples(sounds, &sounds_size, &audio[i]);
             free_audio_bytes(&audio[i]);
         }
     }
     /* Group decodes append in SOND order, before any external file decodes. */
+    DataWin loaded_group={0};
+    size_t loaded_index=SIZE_MAX;
     for (size_t i = 0; i < dw->sound_count; ++i) {
         const Sound *sound = &dw->sounds[i];
         if (!sound->group) continue;
-        const DataWin *group = NULL;
+        size_t group_index=SIZE_MAX;
         for (size_t g = 0; g < files.group_count; ++g)
-            if (files.groups[g].id == sound->group) group = &files.groups[g].dw;
+            if (files.groups[g].id == sound->group) group_index=g;
+        const DataWin *group=NULL;
+        if (group_index!=SIZE_MAX) {
+            if (group_index!=loaded_index) {
+                free_datawin(&loaded_group);
+                const char *path=files.groups[group_index].path;
+                if (bspp_verbose) fprintf(stderr,"Parsing %s\n",path);
+                loaded_group=parse_datawin(read_file(path),true,false);
+                loaded_index=group_index;
+            }
+            group=&loaded_group;
+        }
         if (!group || sound->audio < 0 || (size_t)sound->audio >= group->audio_count) {
             fprintf(stderr, "Missing audiogroup audio %d/%d for SOND #%zu (unmapped group)\n",
                     sound->group, sound->audio, i);
@@ -385,11 +406,12 @@ void process_audio(const DataWin *dw, const char *input_directory,
         Audio decoded = decode_audio(group->audio[sound->audio], label);
         free(label);
         if (decoded.valid) {
-            append_samples(sounds, &decoded);
+            append_samples(sounds, &sounds_size, &decoded);
             mapping[i] = (uint16_t)append_audio(&audio, &audio_count, decoded);
             free_audio_bytes(&audio[mapping[i]]);
         }
     }
+    free_datawin(&loaded_group);
     for (size_t i = 0; i < dw->sound_count; ++i) {
         const Sound *sound = &dw->sounds[i];
         if ((sound->flags & 1) || mapping[i] != UINT16_MAX) continue;
@@ -408,14 +430,15 @@ void process_audio(const DataWin *dw, const char *input_directory,
                     i, sound->file ? sound->file : "(no filename)");
             continue;
         }
-        Audio decoded = decode_audio((Slice){external->bytes.data, external->bytes.size}, external->name);
+        Buffer data=external->consumed ? (Buffer){0}:read_file(external->path);
+        Audio decoded = decode_audio((Slice){data.data,data.size}, external->name);
         if (decoded.valid) {
-            append_samples(sounds, &decoded);
+            append_samples(sounds, &sounds_size, &decoded);
             mapping[i] = (uint16_t)append_audio(&audio, &audio_count, decoded);
             free_audio_bytes(&audio[mapping[i]]);
         }
-        free(external->bytes.data);
-        external->bytes.data = NULL;
+        free(data.data);
+        external->consumed=true;
     }
     size_t music_count = 0;
     for (size_t i = 0; i < files.music_count; ++i) {
@@ -425,7 +448,7 @@ void process_audio(const DataWin *dw, const char *input_directory,
         free(data.data);
         free(path);
         if (files.music[i].audio.valid) {
-            append_samples(sounds, &files.music[i].audio);
+            append_samples(sounds, &sounds_size, &files.music[i].audio);
             free_audio_bytes(&files.music[i].audio);
             ++music_count;
         }
@@ -478,12 +501,12 @@ void process_audio(const DataWin *dw, const char *input_directory,
         free(files.music[i].path);
     }
     if (bspp_verbose) fprintf(stderr, "Audio: %zu AUDO entries, %zu music tracks, %zu sound bytes\n",
-                               audio_count, music_count, sounds->size);
+                               audio_count, music_count, sounds_size);
     for (size_t i = 0; i < files.external_count; ++i) {
         free(files.external[i].name);
-        free(files.external[i].bytes.data);
+        free(files.external[i].path);
     }
-    for (size_t i = 0; i < files.group_count; ++i) free_datawin(&files.groups[i].dw);
+    for (size_t i = 0; i < files.group_count; ++i) free(files.groups[i].path);
     free(files.external);
     free(files.groups);
     free(files.music);

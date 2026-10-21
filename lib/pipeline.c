@@ -32,10 +32,15 @@ static void print_runtime_summary(const struct timespec *start) {
 typedef struct {
     char *name, *key;
     Image image;
+    ClutImage clut;
     int tpag, crop_x, crop_y, crop_w, crop_h;
     size_t order;
 } Asset;
-typedef struct { Asset *items; size_t count; } Assets;
+typedef struct {
+    Asset *items; size_t count;
+    const Options *options;
+    pcre2_code **patterns;
+} Assets;
 typedef struct { int atlas, x, y; } Location;
 
 static bool starts(const char *s, const char *prefix) { return !strncmp(s,prefix,strlen(prefix)); }
@@ -113,9 +118,25 @@ static void debug_tpag(const Options *o,const char *dir,const char *name,
     debug_png(o,dir,name,&out);
     free_image(&out);
 }
+static void prepare_asset(Asset *a,int atlas_size);
 static void add_asset(Assets *assets,char *name,char *key,Image image,int tpag,size_t order) {
+    Asset asset={.name=name,.key=key,.image=image,.tpag=tpag,
+                 .crop_w=image.width,.crop_h=image.height,.order=order};
+    prepare_asset(&asset,assets->options->atlas_size);
+    bool force=false;
+    for (size_t j=0;j<assets->options->pattern_count;++j) {
+        pcre2_match_data *match=pcre2_match_data_create_from_pattern(assets->patterns[j],NULL);
+        if (!match) fail("cannot allocate regex match data");
+        int rc=pcre2_match(assets->patterns[j],(PCRE2_SPTR)name,strlen(name),
+                          0,PCRE2_ANCHORED|PCRE2_ENDANCHORED,match,NULL);
+        pcre2_match_data_free(match);
+        if (rc>=0) force=true;
+        else if (rc!=PCRE2_ERROR_NOMATCH) fail("regex matching failed (%d) for '%s'",rc,name);
+    }
+    asset.clut=make_clut(name,&asset.image,force);
+    free_image(&asset.image);
     assets->items=resize_array(assets->items,assets->count+1,sizeof *assets->items);
-    assets->items[assets->count++]=(Asset){name,key,image,tpag,0,0,image.width,image.height,order};
+    assets->items[assets->count++]=asset;
 }
 static int compare_asset_order(const void *a,const void *b) {
     size_t left=((const Asset *)a)->order,right=((const Asset *)b)->order;
@@ -219,8 +240,8 @@ static void collect_page_assets(Assets *a,const Options *o,const DataWin *dw,Ima
     }
 }
 
-static Assets collect(const Options *o,const DataWin *dw,Image *pages) {
-    Assets a={0};
+static Assets collect(const Options *o,const DataWin *dw,Image *pages,pcre2_code **patterns) {
+    Assets a={.options=o,.patterns=patterns};
     if (o->debug) {
         const char *dirs[]={"sprites","backgrounds","fonts","tiles","atlas_debug"};
         for (size_t i=0;i<5;++i) { char *path=join_path(o->debug,dirs[i]); mkdirs(path); free(path); }
@@ -257,7 +278,6 @@ static Assets collect(const Options *o,const DataWin *dw,Image *pages) {
     free(used);
     /* Palette merging and packing use source order to break ties, not page order. */
     if (a.count>1) qsort(a.items,a.count,sizeof *a.items,compare_asset_order);
-    for (size_t i=0;i<a.count;++i) prepare_asset(&a.items[i],o->atlas_size);
     return a;
 }
 static void output(const Options *o,const char *name,Buffer *buffer) {
@@ -401,25 +421,14 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
             fail("invalid --force-4bpp regex at byte %zu: %s",(size_t)off,(char *)message);
         }
     }
-    Assets assets=collect(o,dw,pages);
+    Assets assets=collect(o,dw,pages,patterns);
     free_decoded_pages(&pages,dw->texture_count);
     if (bspp_verbose) printf("Processing %zu images\n",assets.count);
     ClutImage *images=allocate(assets.count,sizeof *images);
     const char **keys=allocate(assets.count,sizeof *keys);
     Location *locations=allocate(assets.count,sizeof *locations);
     for (size_t i=0;i<assets.count;++i) {
-        bool force=false;
-        for (size_t j=0;j<o->pattern_count;++j) {
-            pcre2_match_data *match=pcre2_match_data_create_from_pattern(patterns[j],NULL);
-            if (!match) fail("cannot allocate regex match data");
-            int rc=pcre2_match(patterns[j],(PCRE2_SPTR)assets.items[i].name,strlen(assets.items[i].name),
-                               0,PCRE2_ANCHORED|PCRE2_ENDANCHORED,match,NULL);
-            pcre2_match_data_free(match);
-            if (rc>=0) force=true;
-            else if (rc!=PCRE2_ERROR_NOMATCH) fail("regex matching failed (%d) for '%s'",rc,assets.items[i].name);
-        }
-        images[i]=make_clut(assets.items[i].name,&assets.items[i].image,force);
-        free_image(&assets.items[i].image);
+        images[i]=assets.items[i].clut;
         keys[i]=assets.items[i].key;
         locations[i].atlas=-1;
     }
@@ -503,30 +512,47 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
         printf("Wrote %zu bytes to %s\n",(size_t)metadata_size,metadata_path);
     }
     free(textures_path); free(metadata_path);
-    char *directory=copy_string(o->input),*slash=strrchr(directory,'/');
-    if (slash) { if (slash==directory) slash[1]='\0'; else *slash='\0'; }
-    else { free(directory); directory=copy_string("."); }
-    Buffer bank={0},sounds={0};
-    process_audio(dw,directory,&bank,&sounds);
-    output(o,"SOUNDBNK.BIN",&bank); output(o,"SOUNDS.BIN",&sounds); free(directory);
     for (size_t i=0;i<assets.count;++i) {
         free(assets.items[i].name); free(assets.items[i].key); free_image(&assets.items[i].image); free_clut(&images[i]);
     }
     free(assets.items); free(images); free(keys); free(locations); free(groups.items); free_atlases(&atlases);
+    char *directory=copy_string(o->input),*slash=strrchr(directory,'/');
+    if (slash) { if (slash==directory) slash[1]='\0'; else *slash='\0'; }
+    else { free(directory); directory=copy_string("."); }
+    char *sounds_path=join_path(o->output,"SOUNDS.BIN");
+    FILE *sounds=fopen(sounds_path,"wb");
+    if (!sounds) fail("cannot create '%s': %s",sounds_path,strerror(errno));
+    Buffer bank={0};
+    process_audio(dw,directory,&bank,sounds);
+    long sounds_size=ftell(sounds);
+    if (sounds_size<0) fail("cannot tell '%s': %s",sounds_path,strerror(errno));
+    if (fclose(sounds)) fail("cannot close '%s': %s",sounds_path,strerror(errno));
+    output(o,"SOUNDBNK.BIN",&bank);
+    if (bspp_verbose) printf("Wrote %zu bytes to %s\n",(size_t)sounds_size,sounds_path);
+    free(sounds_path); free(directory);
 }
-static void ps3(const Options *o,const DataWin *dw,const Image *pages) {
+static void ps3(const Options *o,const DataWin *dw,Image *pages) {
     ClutImage *images=allocate(dw->tpag_count,sizeof *images);
     int *mapping=allocate(dw->tpag_count,sizeof *mapping);
     size_t count=0;
     for (size_t i=0;i<dw->tpag_count;++i) {
         const Tpag *t=&dw->tpags[i]; mapping[i]=-1;
-        if (t->page<0 || (size_t)t->page>=dw->texture_count || !pages[t->page].pixels || !t->tw || !t->th) continue;
-        Image img=extract_tpag(t,pages,dw->texture_count);
-        char *name=format_string("tpag_%zu",i);
-        images[count]=make_clut(name,&img,false);
-        images[count].bpp=8;
+        if (t->page<0 || (size_t)t->page>=dw->texture_count || !dw->textures[t->page].size || !t->tw || !t->th) continue;
         mapping[i]=(int)count++;
-        free(name); free_image(&img);
+    }
+    for (size_t page=0;page<dw->texture_count;++page) {
+        if (!dw->textures[page].size) continue;
+        pages[page]=decode_image(dw->textures[page],version_at_least(dw,2022,5,0,0));
+        for (size_t i=0;i<dw->tpag_count;++i) {
+            if (mapping[i]<0 || dw->tpags[i].page!=(int)page) continue;
+            Image img=extract_tpag(&dw->tpags[i],pages,dw->texture_count);
+            char *name=format_string("tpag_%zu",i);
+            images[mapping[i]]=make_clut(name,&img,false);
+            images[mapping[i]].bpp=8;
+            free(name); free_image(&img);
+        }
+        free(pages[page].pixels);
+        pages[page].pixels=NULL;
     }
     Groups groups=merge_cluts(images,count);
     Buffer out={0};
@@ -539,29 +565,39 @@ static void ps3(const Options *o,const DataWin *dw,const Image *pages) {
         int index=mapping[i];
         put16(&out,index<0 ? 65535:group_row(&groups,images[index].group),true);
     }
-    uint8_t **canvases=allocate(dw->texture_count,sizeof *canvases);
     size_t cursor=0;
     for (size_t i=0;i<dw->texture_count;++i) {
         size_t size=(size_t)pages[i].width*pages[i].height;
-        canvases[i]=allocate(size,1);
         put16(&out,pages[i].width,true); put16(&out,pages[i].height,true);
         put32(&out,cursor,true); put32(&out,size,true);
         if (size>UINT32_MAX-cursor) fail("PS3 page data exceeds 32-bit offsets");
         cursor+=size;
     }
-    for (size_t i=0;i<dw->tpag_count;++i) {
-        if (mapping[i]<0) continue;
-        const Tpag *t=&dw->tpags[i]; const ClutImage *img=&images[mapping[i]]; const Image *page=&pages[t->page];
-        for (int y=0;y<t->th;++y) for (int x=0;x<t->tw;++x)
-            if (t->ty+y<img->height && t->sy+y<page->height && t->tx+x<img->width && t->sx+x<page->width)
-                canvases[t->page][(size_t)(t->sy+y)*page->width+t->sx+x]=img->indices[(size_t)(t->ty+y)*img->width+t->tx+x];
+    char *path=join_path(o->output,"textures.bin");
+    FILE *file=fopen(path,"wb");
+    if (!file) fail("cannot create '%s': %s",path,strerror(errno));
+    file_write_bytes(file,out.data,out.size);
+    size_t output_size=out.size+cursor;
+    free(out.data);
+    for (size_t p=0;p<dw->texture_count;++p) {
+        const Image *page=&pages[p];
+        size_t size=(size_t)page->width*page->height;
+        uint8_t *canvas=allocate(size,1);
+        for (size_t i=0;i<dw->tpag_count;++i) {
+            if (mapping[i]<0 || dw->tpags[i].page!=(int)p) continue;
+            const Tpag *t=&dw->tpags[i]; const ClutImage *img=&images[mapping[i]];
+            for (int y=0;y<t->th;++y) for (int x=0;x<t->tw;++x)
+                if (t->ty+y<img->height && t->sy+y<page->height && t->tx+x<img->width && t->sx+x<page->width)
+                    canvas[(size_t)(t->sy+y)*page->width+t->sx+x]=img->indices[(size_t)(t->ty+y)*img->width+t->tx+x];
+        }
+        file_write_bytes(file,canvas,size);
+        free(canvas);
     }
-    for (size_t i=0;i<dw->texture_count;++i) {
-        append(&out,canvases[i],(size_t)pages[i].width*pages[i].height); free(canvases[i]);
-    }
-    output(o,"textures.bin",&out);
+    if (fclose(file)) fail("cannot close '%s': %s",path,strerror(errno));
+    if (bspp_verbose) printf("Wrote %zu bytes to %s\n",output_size,path);
+    free(path);
     for (size_t i=0;i<count;++i) free_clut(&images[i]);
-    free(images); free(mapping); free(canvases); free(groups.items);
+    free(images); free(mapping); free(groups.items);
 }
 void process(const Options *o) {
     struct timespec start = {0};
@@ -570,10 +606,6 @@ void process(const Options *o) {
     DataWin dw=parse_datawin(read_file(o->input),false,o->ps3);
     mkdirs(o->output);
     Image *pages=allocate(dw.texture_count,sizeof *pages);
-    if (o->ps3) {
-        for (size_t i=0;i<dw.texture_count;++i)
-            if (dw.textures[i].size) pages[i]=decode_image(dw.textures[i],version_at_least(&dw,2022,5,0,0));
-    }
     if (o->ps3) ps3(o,&dw,pages);
     else ps2(o,&dw,pages);
     for (size_t i=0;i<dw.texture_count;++i) free_image(&pages[i]);
