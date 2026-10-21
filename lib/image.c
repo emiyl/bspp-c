@@ -1,6 +1,7 @@
 #include "native.h"
 
 #include <bzlib.h>
+#include <errno.h>
 #include <limits.h>
 #include <png.h>
 #include <stdlib.h>
@@ -534,12 +535,48 @@ static void validate_clut(const ClutImage *image) {
     size_t count = pixel_count(image->width, image->height);
     int slots = image->bpp == 4 ? 16 : 256;
     if ((image->bpp != 4 && image->bpp != 8) ||
-        image->used <= 0 || image->used > slots || !image->indices)
+        image->used <= 0 || image->used > slots || (!image->indices && !image->storage))
         fail("CLUT: invalid palette image");
     for (int i = 1; i < image->used; ++i)
         if (image->palette[i - 1] > image->palette[i]) fail("CLUT: palette is not sorted");
-    for (size_t i = 0; i < count; ++i)
-        if (image->indices[i] >= image->used) fail("CLUT: pixel index outside palette");
+    if (image->indices) {
+        for (size_t i = 0; i < count; ++i)
+            if (image->indices[i] >= image->used) fail("CLUT: pixel index outside palette");
+    } else if (image->storage_offset<0 || image->stored_used<=0 || image->stored_used>slots)
+        fail("CLUT: invalid spooled palette image");
+}
+
+void spool_clut(ClutImage *image, FILE *storage) {
+    if (!storage || image->storage || !image->indices) fail("CLUT: invalid pixel spool");
+    validate_clut(image);
+    size_t count=pixel_count(image->width,image->height);
+    off_t offset=ftello(storage);
+    if (offset<0) fail("cannot tell texture pixel spool position: %s",strerror(errno));
+    if (fwrite(image->indices,1,count,storage)!=count)
+        fail("cannot write texture pixel spool: %s",strerror(errno));
+    image->storage=storage;
+    image->storage_offset=offset;
+    image->stored_used=image->used;
+    for (int i=0;i<image->used;++i) image->remap[i]=(uint8_t)i;
+    free(image->indices);
+    image->indices=NULL;
+}
+
+uint8_t *read_clut_indices(const ClutImage *image) {
+    if (!image->storage) fail("CLUT: image has no pixel spool");
+    size_t count=pixel_count(image->width,image->height);
+    if (fseeko(image->storage,image->storage_offset,SEEK_SET))
+        fail("cannot seek texture pixel spool: %s",strerror(errno));
+    uint8_t *indices=allocate(count,1);
+    if (fread(indices,1,count,image->storage)!=count) {
+        if (ferror(image->storage)) fail("cannot read texture pixel spool: %s",strerror(errno));
+        fail("truncated texture pixel spool");
+    }
+    for (size_t i=0;i<count;++i) {
+        if (indices[i]>=image->stored_used) fail("CLUT: spooled pixel index outside palette");
+        indices[i]=image->remap[indices[i]];
+    }
+    return indices;
 }
 
 static int palette_union(const ClutGroup *a, const ClutGroup *b, uint32_t *out) {
@@ -557,14 +594,18 @@ static int palette_union(const ClutGroup *a, const ClutGroup *b, uint32_t *out) 
 }
 
 static void remap_clut(ClutImage *image, const ClutGroup *group) {
-    uint8_t remap[256];
+    uint8_t remap[256]={0};
     for (int i = 0; i < image->used; ++i) {
         int index = color_index(group->palette, group->used, image->palette[i]);
         if (index < 0) fail("CLUT: merged palette lost a color");
         remap[i] = (uint8_t)index;
     }
-    size_t count = pixel_count(image->width, image->height);
-    for (size_t i = 0; i < count; ++i) image->indices[i] = remap[image->indices[i]];
+    if (image->storage) {
+        for (int i=0;i<image->stored_used;++i) image->remap[i]=remap[image->remap[i]];
+    } else {
+        size_t count = pixel_count(image->width, image->height);
+        for (size_t i = 0; i < count; ++i) image->indices[i] = remap[image->indices[i]];
+    }
     memcpy(image->palette, group->palette, sizeof(image->palette));
     image->used = group->used;
     image->group = group->id;
@@ -577,9 +618,7 @@ Groups merge_cluts(ClutImage *images, size_t count) {
         fail("CLUT: excessive image count");
     ClutGroup *groups = allocate(count, sizeof(ClutGroup));
     bool *alive = allocate(count, sizeof(bool));
-    size_t *heads = allocate(count, sizeof(size_t));
-    size_t *tails = allocate(count, sizeof(size_t));
-    size_t *next_image = allocate(count, sizeof(size_t));
+    size_t *parents = allocate(count, sizeof(size_t));
     size_t table_size = 1;
     while (table_size < count * 2) {
         if (table_size > SIZE_MAX / 2) fail("CLUT: palette lookup size overflow");
@@ -611,13 +650,9 @@ Groups merge_cluts(ClutImage *images, size_t count) {
             for (int j = 0; j < images[i].used; ++j)
                 if (!g->used || g->palette[g->used - 1] != images[i].palette[j])
                     g->palette[g->used++] = images[i].palette[j];
-            heads[group_count] = tails[group_count] = i;
+            parents[group_count] = group_count;
             alive[group_count++] = true;
-        } else {
-            next_image[tails[found]] = i;
-            tails[found] = i;
         }
-        next_image[i] = SIZE_MAX;
         images[i].group = (int)found;
     }
     free(table);
@@ -657,12 +692,7 @@ Groups merge_cluts(ClutImage *images, size_t count) {
                 memset(target->palette, 0, sizeof(target->palette));
                 memcpy(target->palette, combined, (size_t)used * sizeof(uint32_t));
                 target->used = used;
-                for (size_t j = heads[partner]; j != SIZE_MAX; j = next_image[j])
-                    remap_clut(&images[j], target);
-                for (size_t j = heads[a]; j != SIZE_MAX; j = next_image[j])
-                    remap_clut(&images[j], target);
-                next_image[tails[partner]] = heads[a];
-                tails[partner] = tails[a];
+                parents[a] = partner;
                 alive[a] = false;
                 changed = true;
             }
@@ -687,16 +717,18 @@ Groups merge_cluts(ClutImage *images, size_t count) {
     result.count = next;
     for (size_t i = 0; i < count; ++i) {
         int orig = images[i].group;
-        if (orig < 0 || (size_t)orig >= group_count || final_group_for_original[orig] < 0)
+        if (orig < 0 || (size_t)orig >= group_count)
             fail("CLUT: missing final group mapping for image");
-        images[i].group = final_group_for_original[orig];
+        size_t root=(size_t)orig;
+        while (parents[root]!=root) root=parents[root];
+        parents[orig]=root;
+        if (final_group_for_original[root]<0) fail("CLUT: missing final group mapping for image");
+        images[i].group = final_group_for_original[root];
         remap_clut(&images[i], &result.items[images[i].group]);
     }
     free(final_group_for_original);
     free(order);
-    free(heads);
-    free(tails);
-    free(next_image);
+    free(parents);
     free(alive);
     free(groups);
     return result;

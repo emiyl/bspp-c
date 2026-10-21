@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/types.h>
 
 typedef struct { uint8_t *data; size_t size, capacity; } Buffer;
 typedef struct { const uint8_t *data; size_t size; } Slice;
@@ -43,11 +44,17 @@ typedef struct {
     int width, height, bpp, used, group;
     uint32_t palette[256];
     uint8_t *indices;
+    FILE *storage;
+    off_t storage_offset;
+    int stored_used;
+    uint8_t remap[256];
 } ClutImage;
 typedef struct { int id, bpp, used; uint32_t palette[256]; } ClutGroup;
 typedef struct { ClutGroup *items; size_t count; } Groups;
 ClutImage make_clut(const char *name, const Image *image, bool force4);
 Groups merge_cluts(ClutImage *images, size_t count);
+void spool_clut(ClutImage *image, FILE *storage);
+uint8_t *read_clut_indices(const ClutImage *image);
 void free_clut(ClutImage *image);
 typedef struct { size_t image; int x, y; } Placement;
 typedef struct {

@@ -40,6 +40,7 @@ typedef struct {
     Asset *items; size_t count;
     const Options *options;
     pcre2_code **patterns;
+    FILE *storage;
 } Assets;
 typedef struct { int atlas, x, y; } Location;
 
@@ -135,6 +136,7 @@ static void add_asset(Assets *assets,char *name,char *key,Image image,int tpag,s
     }
     asset.clut=make_clut(name,&asset.image,force);
     free_image(&asset.image);
+    spool_clut(&asset.clut,assets->storage);
     assets->items=resize_array(assets->items,assets->count+1,sizeof *assets->items);
     assets->items[assets->count++]=asset;
 }
@@ -240,8 +242,8 @@ static void collect_page_assets(Assets *a,const Options *o,const DataWin *dw,Ima
     }
 }
 
-static Assets collect(const Options *o,const DataWin *dw,Image *pages,pcre2_code **patterns) {
-    Assets a={.options=o,.patterns=patterns};
+static Assets collect(const Options *o,const DataWin *dw,Image *pages,pcre2_code **patterns,FILE *storage) {
+    Assets a={.options=o,.patterns=patterns,.storage=storage};
     if (o->debug) {
         const char *dirs[]={"sprites","backgrounds","fonts","tiles","atlas_debug"};
         for (size_t i=0;i<5;++i) { char *path=join_path(o->debug,dirs[i]); mkdirs(path); free(path); }
@@ -380,8 +382,10 @@ static void debug_atlas(const Options *o,const Atlas *a,const ClutImage *images)
     for (size_t i=0;i<a->count;++i) {
         Placement p=a->entries[i];
         const ClutImage *img=&images[p.image];
+        uint8_t *indices=read_clut_indices(img);
         for (int y=0;y<img->height;++y) for (int x=0;x<img->width;++x)
-            out.pixels[(size_t)(p.y+y)*out.width+p.x+x]=img->palette[img->indices[(size_t)y*img->width+x]];
+            out.pixels[(size_t)(p.y+y)*out.width+p.x+x]=img->palette[indices[(size_t)y*img->width+x]];
+        free(indices);
     }
     for (size_t i=0;i<a->count;++i) {
         Placement p=a->entries[i]; const ClutImage *img=&images[p.image]; uint32_t c=colors[i%7];
@@ -421,7 +425,9 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
             fail("invalid --force-4bpp regex at byte %zu: %s",(size_t)off,(char *)message);
         }
     }
-    Assets assets=collect(o,dw,pages,patterns);
+    FILE *storage=tmpfile();
+    if (!storage) fail("cannot create texture pixel spool: %s",strerror(errno));
+    Assets assets=collect(o,dw,pages,patterns,storage);
     free_decoded_pages(&pages,dw->texture_count);
     if (bspp_verbose) printf("Processing %zu images\n",assets.count);
     ClutImage *images=allocate(assets.count,sizeof *images);
@@ -452,9 +458,11 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
         uint8_t *canvas=allocate(area,1);
         for (size_t j=0;j<a->count;++j) {
             Placement p=a->entries[j]; const ClutImage *img=&images[p.image];
+            uint8_t *indices=read_clut_indices(img);
             locations[p.image]=(Location){a->id,p.x,p.y};
             for (int y=0;y<img->height;++y)
-                memcpy(canvas+(size_t)(p.y+y)*a->width+p.x,img->indices+(size_t)y*img->width,(size_t)img->width);
+                memcpy(canvas+(size_t)(p.y+y)*a->width+p.x,indices+(size_t)y*img->width,(size_t)img->width);
+            free(indices);
         }
         Buffer pixels={0};
         if (a->bpp==4) {
@@ -512,6 +520,7 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
         printf("Wrote %zu bytes to %s\n",(size_t)metadata_size,metadata_path);
     }
     free(textures_path); free(metadata_path);
+    if (fclose(storage)) fail("cannot close texture pixel spool: %s",strerror(errno));
     for (size_t i=0;i<assets.count;++i) {
         free(assets.items[i].name); free(assets.items[i].key); free_image(&assets.items[i].image); free_clut(&images[i]);
     }
@@ -532,6 +541,8 @@ static void ps2(const Options *o,const DataWin *dw,Image *pages) {
     free(sounds_path); free(directory);
 }
 static void ps3(const Options *o,const DataWin *dw,Image *pages) {
+    FILE *storage=tmpfile();
+    if (!storage) fail("cannot create texture pixel spool: %s",strerror(errno));
     ClutImage *images=allocate(dw->tpag_count,sizeof *images);
     int *mapping=allocate(dw->tpag_count,sizeof *mapping);
     size_t count=0;
@@ -549,6 +560,7 @@ static void ps3(const Options *o,const DataWin *dw,Image *pages) {
             char *name=format_string("tpag_%zu",i);
             images[mapping[i]]=make_clut(name,&img,false);
             images[mapping[i]].bpp=8;
+            spool_clut(&images[mapping[i]],storage);
             free(name); free_image(&img);
         }
         free(pages[page].pixels);
@@ -586,9 +598,11 @@ static void ps3(const Options *o,const DataWin *dw,Image *pages) {
         for (size_t i=0;i<dw->tpag_count;++i) {
             if (mapping[i]<0 || dw->tpags[i].page!=(int)p) continue;
             const Tpag *t=&dw->tpags[i]; const ClutImage *img=&images[mapping[i]];
+            uint8_t *indices=read_clut_indices(img);
             for (int y=0;y<t->th;++y) for (int x=0;x<t->tw;++x)
                 if (t->ty+y<img->height && t->sy+y<page->height && t->tx+x<img->width && t->sx+x<page->width)
-                    canvas[(size_t)(t->sy+y)*page->width+t->sx+x]=img->indices[(size_t)(t->ty+y)*img->width+t->tx+x];
+                    canvas[(size_t)(t->sy+y)*page->width+t->sx+x]=indices[(size_t)(t->ty+y)*img->width+t->tx+x];
+            free(indices);
         }
         file_write_bytes(file,canvas,size);
         free(canvas);
@@ -596,6 +610,7 @@ static void ps3(const Options *o,const DataWin *dw,Image *pages) {
     if (fclose(file)) fail("cannot close '%s': %s",path,strerror(errno));
     if (bspp_verbose) printf("Wrote %zu bytes to %s\n",output_size,path);
     free(path);
+    if (fclose(storage)) fail("cannot close texture pixel spool: %s",strerror(errno));
     for (size_t i=0;i<count;++i) free_clut(&images[i]);
     free(images); free(mapping); free(groups.items);
 }
