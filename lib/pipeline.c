@@ -33,6 +33,7 @@ typedef struct {
     char *name, *key;
     Image image;
     int tpag, crop_x, crop_y, crop_w, crop_h;
+    size_t order;
 } Asset;
 typedef struct { Asset *items; size_t count; } Assets;
 typedef struct { int atlas, x, y; } Location;
@@ -112,9 +113,13 @@ static void debug_tpag(const Options *o,const char *dir,const char *name,
     debug_png(o,dir,name,&out);
     free_image(&out);
 }
-static void add_asset(Assets *assets,char *name,char *key,Image image,int tpag) {
+static void add_asset(Assets *assets,char *name,char *key,Image image,int tpag,size_t order) {
     assets->items=resize_array(assets->items,assets->count+1,sizeof *assets->items);
-    assets->items[assets->count++]=(Asset){name,key,image,tpag,0,0,image.width,image.height};
+    assets->items[assets->count++]=(Asset){name,key,image,tpag,0,0,image.width,image.height,order};
+}
+static int compare_asset_order(const void *a,const void *b) {
+    size_t left=((const Asset *)a)->order,right=((const Asset *)b)->order;
+    return (left>right)-(left<right);
 }
 static void prepare_asset(Asset *a,int atlas_size) {
     Image *img=&a->image;
@@ -166,18 +171,19 @@ static void collect_page_assets(Assets *a,const Options *o,const DataWin *dw,Ima
     if (!pages[page_index].pixels && dw->textures[page_index].size)
         pages[page_index]=decode_image(dw->textures[page_index],version_at_least(dw,2022,5,0,0));
     if (!pages[page_index].pixels) return;
+    size_t order=0;
     for (size_t i=0;i<dw->sprite_count;++i) {
         const Sprite *sp=&dw->sprites[i];
         char *owned;
         const char *n=name_or(sp->name,"sprite_",i,&owned);
-        for (size_t j=0;j<sp->count;++j) {
+        for (size_t j=0;j<sp->count;++j,++order) {
             int index=resolve_tpag(dw,sp->textures[j]);
             if (index<0 || dw->tpags[index].page!=(int)page_index) continue;
             Image img=extract_tpag(&dw->tpags[index],pages,dw->texture_count);
             char *name=sp->count>1 ? format_string("%s_%zu",n,j):copy_string(n);
             debug_tpag(o,"sprites",name,&dw->tpags[index],pages,dw->texture_count);
             char *full=format_string("spr/%s",name);
-            add_asset(a,full,sprite_key(n),img,index);
+            add_asset(a,full,sprite_key(n),img,index,order);
             free(name);
         }
         free(owned);
@@ -185,7 +191,7 @@ static void collect_page_assets(Assets *a,const Options *o,const DataWin *dw,Ima
     for (int which=0;which<2;++which) {
         const NamedTexture *items=which ? dw->fonts:dw->backgrounds;
         size_t count=which ? dw->font_count:dw->background_count;
-        for (size_t i=0;i<count;++i) {
+        for (size_t i=0;i<count;++i,++order) {
             int index=resolve_tpag(dw,items[i].texture);
             if (index<0 || dw->tpags[index].page!=(int)page_index) continue;
             char *owned;
@@ -193,11 +199,11 @@ static void collect_page_assets(Assets *a,const Options *o,const DataWin *dw,Ima
             Image img=extract_tpag(&dw->tpags[index],pages,dw->texture_count);
             debug_tpag(o,which?"fonts":"backgrounds",n,&dw->tpags[index],pages,dw->texture_count);
             char *name=format_string("%s/%s",which?"font":"bg",n);
-            add_asset(a,name,copy_string(name),img,index);
+            add_asset(a,name,copy_string(name),img,index,order);
             free(owned);
         }
     }
-    for (size_t i=0;i<dw->tile_count;++i) {
+    for (size_t i=0;i<dw->tile_count;++i,++order) {
         const Tile *t=&dw->tiles[i];
         int index=tile_tpag(dw,t);
         if (index<0 || t->x<0 || t->y<0 || t->width<=0 || t->height<=0 || dw->tpags[index].page!=(int)page_index) continue;
@@ -209,7 +215,7 @@ static void collect_page_assets(Assets *a,const Options *o,const DataWin *dw,Ima
         free_image(&source);
         char *name=tile_name(dw,t,false);
         debug_png(o,"tiles",name+5,&img);
-        add_asset(a,name,tile_name(dw,t,true),img,-1);
+        add_asset(a,name,tile_name(dw,t,true),img,-1,order);
     }
 }
 
@@ -249,6 +255,8 @@ static Assets collect(const Options *o,const DataWin *dw,Image *pages) {
         free_image(&pages[i]);
     }
     free(used);
+    /* Palette merging and packing use source order to break ties, not page order. */
+    if (a.count>1) qsort(a.items,a.count,sizeof *a.items,compare_asset_order);
     for (size_t i=0;i<a.count;++i) prepare_asset(&a.items[i],o->atlas_size);
     return a;
 }
@@ -267,18 +275,42 @@ static int group_row(const Groups *groups,int id) {
     }
     fail("missing CLUT group %d",id);
 }
+static uint32_t ps2_rgba_from_argb(uint32_t argb) {
+    uint32_t a = (argb >> 24) & 255u;
+    uint32_t r = (argb >> 16) & 255u;
+    uint32_t g = (argb >> 8) & 255u;
+    uint32_t b = argb & 255u;
+    uint32_t ps2_alpha = (a + 1u) >> 1;
+    return (ps2_alpha << 24) | (b << 16) | (g << 8) | r;
+}
+
 static void clut_files(const Options *o,const Groups *groups) {
     Buffer four={0},eight={0};
     for (size_t i=0;i<groups->count;++i) {
         const ClutGroup *g=&groups->items[i];
         int slots=g->bpp==4 ? 16:256;
         Buffer *out=g->bpp==4 ? &four:&eight;
+
+        uint32_t palette[256];
+        for (int j=0;j<slots;++j) palette[j]=g->palette[j];
+        for (int j=0;j<slots;++j) palette[j]=ps2_rgba_from_argb(palette[j]);
+
+        if (slots == 256) {
+            for (int j=0;j<slots;++j) {
+                if ((j & 0x18) == 8) {
+                    uint32_t tmp = palette[j];
+                    palette[j] = palette[j + 8];
+                    palette[j + 8] = tmp;
+                }
+            }
+        }
+
         for (int j=0;j<slots;++j) {
-            int k=j;
-            if (slots==256 && (j&0x18)==8) k=j+8;
-            else if (slots==256 && (j&0x18)==16) k=j-8;
-            uint32_t c=g->palette[k];
-            put8(out,(c>>16)&255); put8(out,(c>>8)&255); put8(out,c&255); put8(out,((c>>24)+1)>>1);
+            uint32_t c=palette[j];
+            put8(out, c & 255u);
+            put8(out, (c >> 8) & 255u);
+            put8(out, (c >> 16) & 255u);
+            put8(out, (c >> 24) & 255u);
         }
     }
     output(o,"CLUT4.BIN",&four); output(o,"CLUT8.BIN",&eight);

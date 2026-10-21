@@ -37,6 +37,20 @@ static unsigned qoi_byte(Slice payload, size_t *position) {
     return payload.data[(*position)++];
 }
 
+static uint32_t png_argb(const uint8_t *p) {
+    unsigned a=p[3];
+    uint32_t color=(uint32_t)a<<24;
+    if (!a) return 0;
+    for (int ch=0;ch<3;++ch) {
+        unsigned premultiplied=(p[ch]*a+127)/255;
+        uint32_t increment=(UINT32_C(0xff000000)+a/2)/a;
+        unsigned value=premultiplied>=a ? 255 :
+            (unsigned)((UINT64_C(0x800000)+(uint64_t)premultiplied*increment)>>24);
+        color|=(uint32_t)value<<(16-ch*8);
+    }
+    return color;
+}
+
 static Image decode_qoi(Slice data) {
     if (data.size < 12 || memcmp(data.data, "fioq", 4))
         fail("QOI: invalid header");
@@ -180,8 +194,7 @@ Image decode_image(Slice data, bool gm2022_5) {
         fail("PNG: %s", png.message);
     for (size_t i = 0; i < count; ++i) {
         const uint8_t *p = rgba + i * 4;
-        result.pixels[i] = ((uint32_t)p[3] << 24) | ((uint32_t)p[0] << 16) |
-                           ((uint32_t)p[1] << 8) | p[2];
+        result.pixels[i] = png_argb(p);
     }
     png_image_free(&png);
     free(rgba);
@@ -220,8 +233,7 @@ Image decode_image(Slice data, bool gm2022_5) {
         for (uint32_t x = 0; x < width; ++x) {
             const uint8_t *p = row + x * 4;
             size_t index = (size_t)y * width + x;
-            result.pixels[index] = ((uint32_t)p[3] << 24) | ((uint32_t)p[0] << 16) |
-                                   ((uint32_t)p[1] << 8) | p[2];
+            result.pixels[index] = png_argb(p);
         }
     }
     free(row);
@@ -322,60 +334,132 @@ static ColorBox color_box(const uint32_t *pixels, size_t offset, size_t count) {
     return box;
 }
 
+static int quant_box_sort_channel = 0;
+
+static int quant_box_compare(const void *a, const void *b) {
+    const uint32_t pa = *(const uint32_t *)a;
+    const uint32_t pb = *(const uint32_t *)b;
+    static const unsigned shifts[4] = {16, 8, 0, 24};
+    unsigned va = (pa >> shifts[quant_box_sort_channel]) & 255;
+    unsigned vb = (pb >> shifts[quant_box_sort_channel]) & 255;
+    return (va > vb) - (va < vb);
+}
+
+typedef struct {
+    size_t offset, count;
+    unsigned r_min, r_max, g_min, g_max, b_min, b_max, a_min, a_max;
+    bool split_usable;
+} QuantBox;
+
+static QuantBox quant_box_make(const uint32_t *pixels, size_t offset, size_t count) {
+    unsigned r_min = 255, r_max = 0, g_min = 255, g_max = 0;
+    unsigned b_min = 255, b_max = 0, a_min = 255, a_max = 0;
+    for (size_t i = 0; i < count; ++i) {
+        uint32_t p = pixels[offset + i];
+        unsigned a = (p >> 24) & 255;
+        unsigned r = (p >> 16) & 255;
+        unsigned g = (p >> 8) & 255;
+        unsigned b = p & 255;
+        if (r_min > r) r_min = r;
+        if (r_max < r) r_max = r;
+        if (g_min > g) g_min = g;
+        if (g_max < g) g_max = g;
+        if (b_min > b) b_min = b;
+        if (b_max < b) b_max = b;
+        if (a_min > a) a_min = a;
+        if (a_max < a) a_max = a;
+    }
+    QuantBox result = {offset, count, r_min, r_max, g_min, g_max, b_min, b_max, a_min, a_max, count > 1};
+    return result;
+}
+
+static int quant_box_longest_channel(const QuantBox *box) {
+    unsigned ranges[4] = {
+        box->r_max - box->r_min,
+        box->g_max - box->g_min,
+        box->b_max - box->b_min,
+        box->a_max - box->a_min,
+    };
+    int best = 0;
+    for (int i = 1; i < 4; ++i)
+        if (ranges[i] > ranges[best]) best = i;
+    return best;
+}
+
+static uint32_t quant_box_average(const uint32_t *pixels, size_t offset, size_t count) {
+    uint64_t a_sum = 0, r_sum = 0, g_sum = 0, b_sum = 0;
+    for (size_t i = 0; i < count; ++i) {
+        uint32_t p = pixels[offset + i];
+        a_sum += (p >> 24) & 255;
+        r_sum += (p >> 16) & 255;
+        g_sum += (p >> 8) & 255;
+        b_sum += p & 255;
+    }
+    uint32_t a = (uint32_t)(a_sum / count);
+    uint32_t r = (uint32_t)(r_sum / count);
+    uint32_t g = (uint32_t)(g_sum / count);
+    uint32_t b = (uint32_t)(b_sum / count);
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
 static int quantize(uint32_t *pixels, size_t count, int maximum, uint32_t *palette) {
-    ColorBox boxes[256];
+    QuantBox boxes[256];
     int box_count = 1;
-    boxes[0] = color_box(pixels, 0, count);
-    uint32_t *scratch = allocate(count, sizeof(uint32_t));
+    boxes[0] = quant_box_make(pixels, 0, count);
     while (box_count < maximum) {
         int target = -1;
         uint64_t best = 0;
         for (int i = 0; i < box_count; ++i) {
-            uint64_t score = (uint64_t)boxes[i].count * boxes[i].range;
-            if (boxes[i].count > 1 && score > best) { best = score; target = i; }
+            if (boxes[i].count <= 1) continue;
+            unsigned range = 0;
+            unsigned r_range = boxes[i].r_max - boxes[i].r_min;
+            unsigned g_range = boxes[i].g_max - boxes[i].g_min;
+            unsigned b_range = boxes[i].b_max - boxes[i].b_min;
+            unsigned a_range = boxes[i].a_max - boxes[i].a_min;
+            if (r_range > range) range = r_range;
+            if (g_range > range) range = g_range;
+            if (b_range > range) range = b_range;
+            if (a_range > range) range = a_range;
+            uint64_t score = (uint64_t)boxes[i].count * range;
+            if (score > best) { best = score; target = i; }
         }
         if (target < 0) break;
-        ColorBox box = boxes[target];
-        size_t frequencies[256] = {0}, positions[256], offset = 0;
-        for (size_t i = 0; i < box.count; ++i)
-            ++frequencies[(pixels[box.offset + i] >> box.shift) & 255];
-        for (int i = 0; i < 256; ++i) {
-            positions[i] = offset;
-            offset += frequencies[i];
+        QuantBox box = boxes[target];
+        int channel = quant_box_longest_channel(&box);
+        static const unsigned shifts[4] = {16, 8, 0, 24};
+        quant_box_sort_channel = channel;
+        qsort(pixels + box.offset, box.count, sizeof(uint32_t), quant_box_compare);
+        size_t split = box.count / 2;
+        uint32_t key = (pixels[box.offset + split] >> shifts[channel]) & 255;
+        size_t forward = split;
+        while (forward < box.count && ((pixels[box.offset + forward] >> shifts[channel]) & 255) == key) ++forward;
+        size_t backward = split;
+        while (backward > 0 && ((pixels[box.offset + backward - 1] >> shifts[channel]) & 255) == key) --backward;
+        if (backward > 0 && forward < box.count) {
+            split = (split - backward <= (size_t)forward - split) ? backward : forward;
+        } else if (backward > 0) {
+            split = backward;
+        } else if (forward < box.count) {
+            split = forward;
+        } else {
+            boxes[target].split_usable = false;
+            continue;
         }
-        for (size_t i = 0; i < box.count; ++i) {
-            uint32_t p = pixels[box.offset + i];
-            scratch[positions[(p >> box.shift) & 255]++] = p;
+        QuantBox left = quant_box_make(pixels, box.offset, split);
+        QuantBox right = quant_box_make(pixels, box.offset + split, box.count - split);
+        if (left.count == 0 || right.count == 0) {
+            boxes[target].split_usable = false;
+            continue;
         }
-        memcpy(pixels + box.offset, scratch, box.count * sizeof(uint32_t));
-        size_t middle = box.count / 2, forward = middle, backward = middle;
-        unsigned key = (scratch[middle] >> box.shift) & 255;
-        while (forward < box.count && ((scratch[forward] >> box.shift) & 255) == key) ++forward;
-        while (backward && ((scratch[backward - 1] >> box.shift) & 255) == key) --backward;
-        size_t split;
-        if (backward && forward < box.count)
-            split = middle - backward <= forward - middle ? backward : forward;
-        else if (backward) split = backward;
-        else if (forward < box.count) split = forward;
-        else { boxes[target].range = 0; continue; }
         memmove(boxes + target, boxes + target + 1,
-                (size_t)(box_count - target - 1) * sizeof(ColorBox));
+                (size_t)(box_count - target - 1) * sizeof(QuantBox));
         --box_count;
-        boxes[box_count++] = color_box(pixels, box.offset, split);
-        boxes[box_count++] = color_box(pixels, box.offset + split, box.count - split);
+        boxes[box_count++] = left;
+        boxes[box_count++] = right;
     }
     for (int i = 0; i < box_count; ++i) {
-        uint64_t sums[4] = {0};
-        ColorBox box = boxes[i];
-        for (size_t j = 0; j < box.count; ++j) {
-            uint32_t p = pixels[box.offset + j];
-            for (int c = 0; c < 4; ++c) sums[c] += (p >> (c * 8)) & 255;
-        }
-        palette[i] = 0;
-        for (int c = 0; c < 4; ++c)
-            palette[i] |= (uint32_t)(sums[c] / box.count) << (c * 8);
+        palette[i] = quant_box_average(pixels, boxes[i].offset, boxes[i].count);
     }
-    free(scratch);
     return box_count;
 }
 
@@ -505,6 +589,12 @@ static void remap_clut(ClutImage *image, const ClutGroup *group) {
     image->group = group->id;
 }
 
+static int compare_group_id(const void *a, const void *b) {
+    const ClutGroup *ga = (const ClutGroup *)a;
+    const ClutGroup *gb = (const ClutGroup *)b;
+    return (ga->id > gb->id) - (ga->id < gb->id);
+}
+
 Groups merge_cluts(ClutImage *images, size_t count) {
     Groups result = {0};
     if (!count) return result;
@@ -604,10 +694,30 @@ Groups merge_cluts(ClutImage *images, size_t count) {
         } while (changed);
     }
     result.items = allocate(group_count, sizeof(ClutGroup));
-    for (size_t i = 0; i < group_count; ++i)
-        if (alive[i]) result.items[result.count++] = groups[i];
-    for (size_t i = 0; i < count; ++i)
-        remap_clut(&images[i], &groups[images[i].group]);
+    int *final_group_for_original = allocate(group_count, sizeof(int));
+    for (size_t i = 0; i < group_count; ++i) final_group_for_original[i] = -1;
+    size_t next = 0;
+    for (size_t i = 0; i < group_count; ++i) if (alive[i] && groups[i].bpp == 4) {
+        result.items[next] = groups[i];
+        result.items[next].id = (int)next;
+        final_group_for_original[i] = (int)next;
+        ++next;
+    }
+    for (size_t i = 0; i < group_count; ++i) if (alive[i] && groups[i].bpp == 8) {
+        result.items[next] = groups[i];
+        result.items[next].id = (int)next;
+        final_group_for_original[i] = (int)next;
+        ++next;
+    }
+    result.count = next;
+    for (size_t i = 0; i < count; ++i) {
+        int orig = images[i].group;
+        if (orig < 0 || (size_t)orig >= group_count || final_group_for_original[orig] < 0)
+            fail("CLUT: missing final group mapping for image");
+        images[i].group = final_group_for_original[orig];
+        remap_clut(&images[i], &result.items[images[i].group]);
+    }
+    free(final_group_for_original);
     free(order);
     free(heads);
     free(tails);

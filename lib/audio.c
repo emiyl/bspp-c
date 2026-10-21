@@ -9,7 +9,8 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
-#include <vorbis/vorbisfile.h>
+#define STB_VORBIS_HEADER_ONLY
+#include "stb_vorbis.c"
 
 typedef struct {
     bool valid;
@@ -242,42 +243,6 @@ static Audio decode_wav(Slice data, const char *label) {
     return convert_pcm(samples, count, rate, channels);
 }
 
-typedef struct { Slice data; size_t position; } VorbisMemory;
-
-static size_t vorbis_read(void *ptr, size_t size, size_t count, void *opaque) {
-    VorbisMemory *memory = opaque;
-    if (!size) return 0;
-    size_t available = (memory->data.size - memory->position) / size;
-    if (count > available) count = available;
-    size_t bytes = size * count;
-    if (bytes) memcpy(ptr, memory->data.data + memory->position, bytes);
-    memory->position += bytes;
-    return count;
-}
-
-static int vorbis_seek(void *opaque, ogg_int64_t offset, int whence) {
-    VorbisMemory *memory = opaque;
-    size_t base;
-    if (whence == SEEK_SET) base = 0;
-    else if (whence == SEEK_CUR) base = memory->position;
-    else if (whence == SEEK_END) base = memory->data.size;
-    else return -1;
-    if (offset < 0) {
-        uint64_t magnitude = (uint64_t)(-(offset + 1)) + 1;
-        if (magnitude > base) return -1;
-        memory->position = base - (size_t)magnitude;
-    } else {
-        if ((uint64_t)offset > memory->data.size - base) return -1;
-        memory->position = base + (size_t)offset;
-    }
-    return 0;
-}
-
-static long vorbis_tell(void *opaque) {
-    VorbisMemory *memory = opaque;
-    return memory->position > LONG_MAX ? -1 : (long)memory->position;
-}
-
 static bool validate_ogg(Slice data, const char *label) {
     bool vorbis = false, ended = false;
     for (size_t pos = 0; pos < data.size;) {
@@ -304,92 +269,42 @@ static bool validate_ogg(Slice data, const char *label) {
 
 static Audio decode_ogg(Slice data, const char *label) {
     bool identified_vorbis = validate_ogg(data, label);
-    VorbisMemory memory = {data, 0};
-    OggVorbis_File vf;
-    ov_callbacks callbacks = {vorbis_read, vorbis_seek, NULL, vorbis_tell};
-    int error = ov_open_callbacks(&memory, &vf, NULL, 0, callbacks);
-    if (error) {
-        if (error == OV_ENOTVORBIS && !identified_vorbis) {
-            fprintf(stderr, "Unsupported OGG codec: %s (unmapped)\n", label);
-            return (Audio){0};
-        }
-        fail("Corrupt OGG/Vorbis %s: decoder error %d", label, error);
+    if (!identified_vorbis) {
+        fprintf(stderr, "Unsupported OGG codec: %s (unmapped)\n", label);
+        return (Audio){0};
     }
-    vorbis_info *info = ov_info(&vf, 0);
-    ogg_int64_t total = ov_pcm_total(&vf, -1);
-    if (!info || total < 0 || info->rate <= 0 || info->rate > INT_MAX ||
-        info->channels <= 0 || info->channels > UINT16_MAX) {
-        ov_clear(&vf);
-        fail("Invalid Vorbis stream metadata: %s", label);
-    }
-    unsigned rate = (unsigned)info->rate, channels = (unsigned)info->channels;
-    for (long i = 1; i < ov_streams(&vf); ++i) {
-        vorbis_info *link = ov_info(&vf, (int)i);
-        if (!link || link->rate != (long)rate || link->channels != (int)channels) {
-            ov_clear(&vf);
-            fprintf(stderr, "Unsupported changing-format chained Vorbis: %s (unmapped)\n", label);
-            return (Audio){0};
-        }
-    }
+    if (data.size > INT_MAX) fail("Vorbis input exceeds decoder limit: %s", label);
+    int error=0;
+    stb_vorbis *vf=stb_vorbis_open_memory(data.data,(int)data.size,&error,NULL);
+    if (!vf) fail("Corrupt OGG/Vorbis %s: decoder error %d",label,error);
+    stb_vorbis_info info=stb_vorbis_get_info(vf);
+    unsigned total=stb_vorbis_stream_length_in_samples(vf);
+    unsigned rate=info.sample_rate,channels=(unsigned)info.channels;
+    if (!rate || rate>INT_MAX || !channels || channels>UINT16_MAX)
+        fail("Invalid Vorbis stream metadata: %s",label);
     if (!total) {
-        ov_clear(&vf);
+        stb_vorbis_close(vf);
         fprintf(stderr, "Empty Vorbis stream: %s (unmapped)\n", label);
         return (Audio){0};
     }
-    size_t capacity = (size_t)total * channels;
-    if ((uint64_t)total > SIZE_MAX / channels) {
-        ov_clear(&vf);
-        fail("Vorbis sample allocation overflows: %s", label);
+    if (total>INT_MAX/channels) fail("Vorbis sample allocation exceeds decoder limit: %s",label);
+    size_t capacity=(size_t)total*channels;
+    float *samples=allocate(capacity,sizeof *samples);
+    int frames=stb_vorbis_get_samples_float_interleaved(vf,(int)channels,samples,(int)capacity);
+    error=stb_vorbis_get_error(vf);
+    stb_vorbis_close(vf);
+    if (error || frames<=0) fail("Corrupt Vorbis sample data: %s (decoder error %d)",label,error);
+    size_t count=(size_t)frames*channels;
+    int16_t *pcm=allocate(count,sizeof *pcm);
+    for (size_t i=0;i<count;++i) {
+        float value=samples[i];
+        if (!isfinite(value)) fail("Non-finite Vorbis PCM sample: %s",label);
+        if (value < -1.0f) value=-1.0f;
+        if (value > 1.0f) value=1.0f;
+        pcm[i]=(int16_t)(int)(value*32767.0f);
     }
-    int16_t *pcm = allocate(capacity, sizeof(*pcm));
-    size_t frames = 0;
-    for (;;) {
-        float **samples;
-        int link;
-        long got = ov_read_float(&vf, &samples, 4096, &link);
-        if (!got) break;
-        if (got < 0) {
-            free(pcm);
-            ov_clear(&vf);
-            fail("Corrupt Vorbis sample data: %s (decoder result %ld)", label, got);
-        }
-        if ((uint64_t)got > (uint64_t)SIZE_MAX / channels) {
-            free(pcm);
-            ov_clear(&vf);
-            fail("Vorbis sample chunk exceeds size limit: %s (%ld)", label, got);
-        }
-        size_t needed = frames + (size_t)got;
-        if ((uint64_t)needed * channels > capacity) {
-            size_t expanded = capacity ? capacity : 4096;
-            while ((uint64_t)needed * channels > expanded) expanded *= 2;
-            int16_t *resized = realloc(pcm, expanded * sizeof(*resized));
-            if (!resized) {
-                free(pcm);
-                ov_clear(&vf);
-                fail("Vorbis sample allocation overflows: %s", label);
-            }
-            pcm = resized;
-            capacity = expanded;
-        }
-        for (long f = 0; f < got; ++f)
-            for (unsigned ch = 0; ch < channels; ++ch) {
-                float value = samples[ch][f];
-                if (!isfinite(value)) {
-                    free(pcm); ov_clear(&vf);
-                    fail("Non-finite Vorbis PCM sample: %s", label);
-                }
-                if (value < -1.0f) value = -1.0f;
-                if (value > 1.0f) value = 1.0f;
-                pcm[(frames + (size_t)f) * channels + ch] = (int16_t)(int)(value * 32767.0f);
-            }
-        frames += (size_t)got;
-    }
-    ov_clear(&vf);
-    if (!frames) {
-        free(pcm);
-        fail("Empty Vorbis PCM output: %s", label);
-    }
-    return convert_pcm(pcm, frames * channels, rate, channels);
+    free(samples);
+    return convert_pcm(pcm,count,rate,channels);
 }
 
 static Audio decode_audio(Slice data, const char *label) {
