@@ -9,6 +9,7 @@
 
 typedef struct { uint8_t *data; size_t size, capacity; } Buffer;
 typedef struct { const uint8_t *data; size_t size; } Slice;
+extern bool bspp_verbose;
 _Noreturn void fail(const char *format, ...);
 void *allocate(size_t count, size_t size);
 void *resize_array(void *ptr, size_t count, size_t size);

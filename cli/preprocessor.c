@@ -13,6 +13,7 @@ static void help(void) {
          "  --atlas-size=<pixels>   Square atlas dimensions (default: 512; PS2)\n"
          "  --force-4bpp=<regex>    Full internal image-name PCRE2 match; repeatable (PS2)\n"
          "  --debug-output=<path>   Extract debug PNGs (PS2)\n"
+         "  -v, --verbose           Show processing progress and output paths\n"
          "  -h, --help              Show help\n"
          "\nImage names include spr/, bg/, font/, or tile/ prefixes.");
 }
@@ -27,6 +28,9 @@ int main(int argc, char **argv) {
         if (!positional && !strcmp(arg, "--")) { positional = true; continue; }
         if (!positional && (!strcmp(arg, "--help") || !strcmp(arg, "-h"))) {
             help(); free(o.patterns); return 0;
+        }
+        if (!positional && (!strcmp(arg, "--verbose") || !strcmp(arg, "-v"))) {
+            o.verbose = true; continue;
         }
         if (!positional && arg[0] == '-' && arg[1]) {
             const char *equal = strchr(arg, '=');

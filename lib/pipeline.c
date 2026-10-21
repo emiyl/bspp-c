@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+bool bspp_verbose = false;
+
 typedef struct {
     char *name, *key;
     Image image;
@@ -194,7 +196,7 @@ static Assets collect(const Options *o,const DataWin *dw,const Image *pages) {
 static void output(const Options *o,const char *name,Buffer *buffer) {
     char *path=join_path(o->output,name);
     write_file(path,buffer->data,buffer->size);
-    printf("Wrote %zu bytes to %s\n",buffer->size,path);
+    if (bspp_verbose) printf("Wrote %zu bytes to %s\n",buffer->size,path);
     free(path); free(buffer->data); *buffer=(Buffer){0};
 }
 static int group_row(const Groups *groups,int id) {
@@ -276,7 +278,7 @@ static void ps2(const Options *o,const DataWin *dw,const Image *pages) {
         }
     }
     Assets assets=collect(o,dw,pages);
-    printf("Processing %zu images\n",assets.count);
+    if (bspp_verbose) printf("Processing %zu images\n",assets.count);
     ClutImage *images=allocate(assets.count,sizeof *images);
     const char **keys=allocate(assets.count,sizeof *keys);
     Location *locations=allocate(assets.count,sizeof *locations);
@@ -405,6 +407,7 @@ static void ps3(const Options *o,const DataWin *dw,const Image *pages) {
     free(images); free(mapping); free(canvases); free(groups.items);
 }
 void process(const Options *o) {
+    bspp_verbose = o->verbose;
     DataWin dw=parse_datawin(read_file(o->input),false,o->ps3);
     mkdirs(o->output);
     Image *pages=allocate(dw.texture_count,sizeof *pages);
@@ -414,5 +417,5 @@ void process(const Options *o) {
     else ps2(o,&dw,pages);
     for (size_t i=0;i<dw.texture_count;++i) free_image(&pages[i]);
     free(pages); free_datawin(&dw);
-    puts("Done!");
+    if (bspp_verbose) puts("Done!");
 }

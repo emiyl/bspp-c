@@ -94,7 +94,7 @@ static void scan_directory(Files *files, const char *root, const char *relative,
                         fail("Ambiguous duplicate audiogroup %d: %s", id, path);
                 files->groups = resize_array(files->groups, files->group_count + 1,
                                              sizeof(*files->groups));
-                fprintf(stderr, "Parsing %s\n", path);
+                if (bspp_verbose) fprintf(stderr, "Parsing %s\n", path);
                 files->groups[files->group_count++] =
                     (AudioGroup){id, parse_datawin(read_file(path), true, false)};
             } else if (!*relative && (extension(names[i], ".wav") || extension(names[i], ".ogg"))) {
@@ -520,8 +520,8 @@ void process_audio(const DataWin *dw, const char *input_directory,
         free(a->bytes.data);
         free(files.music[i].path);
     }
-    fprintf(stderr, "Audio: %zu AUDO entries, %zu music tracks, %zu sound bytes\n",
-            audio_count, music_count, sounds->size);
+    if (bspp_verbose) fprintf(stderr, "Audio: %zu AUDO entries, %zu music tracks, %zu sound bytes\n",
+                               audio_count, music_count, sounds->size);
     for (size_t i = 0; i < files.external_count; ++i) {
         free(files.external[i].name);
         free(files.external[i].bytes.data);

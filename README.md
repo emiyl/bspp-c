@@ -31,6 +31,7 @@ Common flags:
 - `--atlas-size=<pixels>`: atlas size for PS2 output
 - `--force-4bpp=<regex>`: force 4bpp for matching images
 - `--debug-output=<path>`: extract debug PNGs
+- `-v, --verbose`: show processing progress and file output paths
 - `-h, --help`: show usage
 
 ### Library usage
@@ -48,6 +49,7 @@ int main(void) {
         .output = "./output",
         .atlas_size = 512,
         .ps3 = false,
+        .verbose = false,
         .patterns = NULL,
         .pattern_count = 0
     };

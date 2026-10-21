@@ -240,8 +240,8 @@ DataWin parse_datawin(Buffer source, bool audio_only, bool ps3) {
         }
         p=end;
     }
-    printf("Parsed: %zu sprites, %zu backgrounds, %zu fonts, %zu pages, %zu TPAGs, %zu sounds\n",
-           dw.sprite_count,dw.background_count,dw.font_count,dw.texture_count,dw.tpag_count,dw.sound_count);
+    if (bspp_verbose) printf("Parsed: %zu sprites, %zu backgrounds, %zu fonts, %zu pages, %zu TPAGs, %zu sounds\n",
+                             dw.sprite_count,dw.background_count,dw.font_count,dw.texture_count,dw.tpag_count,dw.sound_count);
     return dw;
 }
 

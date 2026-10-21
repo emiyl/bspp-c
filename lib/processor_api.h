@@ -8,6 +8,7 @@
 typedef struct {
     const char *input, *output, *debug;
     bool ps3;
+    bool verbose;
     int atlas_size;
     char **patterns;
     size_t pattern_count;
