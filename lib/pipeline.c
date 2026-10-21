@@ -257,6 +257,11 @@ static void debug_atlas(const Options *o,const Atlas *a,const ClutImage *images)
     char *name=format_string("atlas_%d_%dbpp",a->id,a->bpp);
     debug_png(o,"atlas_debug",name,&out); free(name); free_image(&out);
 }
+static void free_decoded_pages(Image **pages, size_t count) {
+    if (!pages || !*pages) return;
+    for (size_t i=0;i<count;++i) free_image(&(*pages)[i]);
+    free(*pages); *pages=NULL;
+}
 static void metadata_entry(Buffer *out,const Asset *a,const ClutImage *image,
                            Location location,const Groups *groups) {
     put16(out,location.atlas<0 ? 65535:(unsigned)location.atlas,false);
@@ -266,7 +271,7 @@ static void metadata_entry(Buffer *out,const Asset *a,const ClutImage *image,
     put16(out,a ? a->crop_w:0,false); put16(out,a ? a->crop_h:0,false);
     put16(out,image ? group_row(groups,image->group):0,false);
 }
-static void ps2(const Options *o,const DataWin *dw,const Image *pages) {
+static void ps2(const Options *o,const DataWin *dw,Image *pages) {
     pcre2_code **patterns=allocate(o->pattern_count,sizeof *patterns);
     for (size_t i=0;i<o->pattern_count;++i) {
         int err; PCRE2_SIZE off;
@@ -278,6 +283,7 @@ static void ps2(const Options *o,const DataWin *dw,const Image *pages) {
         }
     }
     Assets assets=collect(o,dw,pages);
+    free_decoded_pages(&pages,dw->texture_count);
     if (bspp_verbose) printf("Processing %zu images\n",assets.count);
     ClutImage *images=allocate(assets.count,sizeof *images);
     const char **keys=allocate(assets.count,sizeof *keys);
