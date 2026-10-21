@@ -180,6 +180,7 @@ static void encode_pcm(PcmEncoder *encoder, const int16_t *pcm, size_t frames, b
     size_t output_frames=(size_t)(end/encoder->ratio);
     while (!final || encoder->encoded<output_frames) {
         double position = encoder->encoded * encoder->ratio;
+        if (position>=end) break;
         size_t source = encoder->ratio>1.0 ? (size_t)position : encoder->encoded;
         if (source>=end || (!final && encoder->ratio>1.0 && source+1>=end)) break;
         if (source<base && (!base || source!=base-1)) fail("PCM resampler lost source frames");
@@ -207,7 +208,7 @@ static Audio finish_pcm(PcmEncoder *encoder) {
     encode_pcm(encoder,NULL,0,true);
     size_t count=(size_t)(encoder->frames/encoder->ratio);
     if (encoder->encoded<count) fail("PCM resampler produced too few samples");
-    /* Until EOF, one speculative sample may precede the final floor(frames / ratio) limit. */
+    /* Streaming may encode one extra sample before EOF establishes floor(frames / ratio). */
     encoder->audio.count=(uint32_t)count;
     encoder->audio.bytes.size=count/2+count%2;
     if (count&1) encoder->audio.bytes.data[encoder->audio.bytes.size-1]&=15;
