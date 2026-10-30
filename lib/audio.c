@@ -4,7 +4,9 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#if BSPP_ENABLE_PARALLEL
 #include <pthread.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -537,18 +539,22 @@ typedef struct {
 } AudioJob;
 
 typedef struct {
+#if BSPP_ENABLE_PARALLEL
     pthread_mutex_t mutex;
     pthread_cond_t work, done;
     pthread_t threads[AUDIO_WORKERS];
+#endif
     size_t worker_count, count, next, finished;
     bool stopping;
     AudioJob *jobs;
 } AudioPool;
 
+#if BSPP_ENABLE_PARALLEL
 static void audio_thread_check(int error, const char *operation) {
     if (error)
         fail("audio worker %s: %s", operation, strerror(error));
 }
+#endif
 
 static void decode_job(AudioJob *job) {
     Buffer data = {0};
@@ -559,6 +565,7 @@ static void decode_job(AudioJob *job) {
     free(data.data);
 }
 
+#if BSPP_ENABLE_PARALLEL
 static void *audio_pool_worker(void *context) {
     AudioPool *pool = context;
     audio_thread_check(pthread_mutex_lock(&pool->mutex), "lock");
@@ -580,8 +587,10 @@ static void *audio_pool_worker(void *context) {
     audio_thread_check(pthread_mutex_unlock(&pool->mutex), "unlock");
     return NULL;
 }
+#endif
 
 static void start_audio_pool(AudioPool *pool, bool parallel) {
+#if BSPP_ENABLE_PARALLEL
     if (!parallel)
         return;
 
@@ -598,6 +607,10 @@ static void start_audio_pool(AudioPool *pool, bool parallel) {
             "start");
         ++pool->worker_count;
     }
+#else
+    (void)pool;
+    (void)parallel;
+#endif
 }
 
 static void decode_jobs(AudioPool *pool, AudioJob *jobs, size_t count) {
@@ -610,6 +623,7 @@ static void decode_jobs(AudioPool *pool, AudioJob *jobs, size_t count) {
         return;
     }
 
+#if BSPP_ENABLE_PARALLEL
     audio_thread_check(pthread_mutex_lock(&pool->mutex), "lock");
 
     pool->jobs = jobs;
@@ -621,9 +635,11 @@ static void decode_jobs(AudioPool *pool, AudioJob *jobs, size_t count) {
         audio_thread_check(pthread_cond_wait(&pool->done, &pool->mutex),
                            "wait for completion");
     audio_thread_check(pthread_mutex_unlock(&pool->mutex), "unlock");
+#endif
 }
 
 static void stop_audio_pool(AudioPool *pool) {
+#if BSPP_ENABLE_PARALLEL
     if (!pool->worker_count)
         return;
 
@@ -640,6 +656,9 @@ static void stop_audio_pool(AudioPool *pool) {
     audio_thread_check(pthread_cond_destroy(&pool->done),
                        "destroy completion condition");
     audio_thread_check(pthread_mutex_destroy(&pool->mutex), "destroy mutex");
+#else
+    (void)pool;
+#endif
 }
 
 static size_t append_audio(Audio **items, size_t *count, Audio audio) {

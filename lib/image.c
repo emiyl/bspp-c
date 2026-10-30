@@ -366,7 +366,11 @@ typedef struct {
     unsigned shift;
 } ColorBox;
 
+#if BSPP_ENABLE_PARALLEL
 static _Thread_local int quant_box_sort_channel = 0;
+#else
+static int quant_box_sort_channel = 0;
+#endif
 
 static int quant_box_compare(const void *a, const void *b) {
     const uint32_t pa = *(const uint32_t *)a;

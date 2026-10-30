@@ -15,8 +15,10 @@ static void help(void) {
          "  --force-4bpp=<regex>    Full internal image-name PCRE2 match; "
          "repeatable (PS2)\n"
          "  --debug-output=<path>   Extract debug PNGs (PS2)\n"
+#if BSPP_ENABLE_PARALLEL
          "  --parallel=(true|false) Enable image/audio workers and PS2 stage overlap "
          "(default: true)\n"
+#endif
          "  -v, --verbose           Show processing progress and output paths\n"
          "  -h, --help              Show help\n"
          "\nImage names include spr/, bg/, font/, or tile/ prefixes.");
@@ -26,6 +28,7 @@ int main(int argc, char **argv) {
     Options o = {0};
     o.output = "output";
     o.atlas_size = 512;
+    o.no_parallel = !BSPP_ENABLE_PARALLEL;
     bool positional = false;
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -72,6 +75,8 @@ int main(int argc, char **argv) {
             else if (parallel) {
                 if (strcmp(value, "true") && strcmp(value, "false"))
                     fail("parallel must be true or false");
+                if (!BSPP_ENABLE_PARALLEL && !strcmp(value, "true"))
+                    fail("parallel support was disabled at build time (ENABLE_PARALLEL=OFF)");
                 o.no_parallel = !strcmp(value, "false");
             } else if (target) {
                 if (strcmp(value, "ps2") && strcmp(value, "ps3"))

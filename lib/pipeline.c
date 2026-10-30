@@ -2,7 +2,9 @@
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <errno.h>
 #include <pcre2.h>
+#if BSPP_ENABLE_PARALLEL
 #include <pthread.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,9 +44,11 @@ typedef struct {
 } Asset;
 enum { IMAGE_WORKERS = 4 };
 typedef struct {
+#if BSPP_ENABLE_PARALLEL
     pthread_mutex_t mutex;
     pthread_cond_t work, done;
     pthread_t threads[IMAGE_WORKERS];
+#endif
     size_t worker_count, count, next, finished, pending;
     bool stopping;
     Asset jobs[IMAGE_WORKERS];
@@ -196,6 +200,7 @@ static void convert_asset(Asset *asset, const ImagePool *pool) {
         asset->clut.bpp = 8;
     free_image(&asset->image);
 }
+#if BSPP_ENABLE_PARALLEL
 static void image_thread_check(int error, const char *operation) {
     if (error)
         fail("image worker %s: %s", operation, strerror(error));
@@ -220,7 +225,9 @@ static void *image_pool_worker(void *context) {
     image_thread_check(pthread_mutex_unlock(&pool->mutex), "unlock");
     return NULL;
 }
+#endif
 static void start_image_pool(ImagePool *pool) {
+#if BSPP_ENABLE_PARALLEL
     if (pool->options->no_parallel)
         return;
     image_thread_check(pthread_mutex_init(&pool->mutex, NULL), "initialize mutex");
@@ -231,6 +238,9 @@ static void start_image_pool(ImagePool *pool) {
                            "start");
         ++pool->worker_count;
     }
+#else
+    (void)pool;
+#endif
 }
 static void convert_image_jobs(ImagePool *pool) {
     if (!pool->pending)
@@ -240,6 +250,7 @@ static void convert_image_jobs(ImagePool *pool) {
             convert_asset(&pool->jobs[i], pool);
         return;
     }
+#if BSPP_ENABLE_PARALLEL
     image_thread_check(pthread_mutex_lock(&pool->mutex), "lock");
     pool->count = pool->pending;
     pool->next = pool->finished = 0;
@@ -248,8 +259,10 @@ static void convert_image_jobs(ImagePool *pool) {
         image_thread_check(pthread_cond_wait(&pool->done, &pool->mutex),
                            "wait for completion");
     image_thread_check(pthread_mutex_unlock(&pool->mutex), "unlock");
+#endif
 }
 static void stop_image_pool(ImagePool *pool) {
+#if BSPP_ENABLE_PARALLEL
     if (!pool->worker_count)
         return;
     image_thread_check(pthread_mutex_lock(&pool->mutex), "lock");
@@ -261,6 +274,9 @@ static void stop_image_pool(ImagePool *pool) {
     image_thread_check(pthread_cond_destroy(&pool->work), "destroy work condition");
     image_thread_check(pthread_cond_destroy(&pool->done), "destroy completion condition");
     image_thread_check(pthread_mutex_destroy(&pool->mutex), "destroy mutex");
+#else
+    (void)pool;
+#endif
 }
 static void flush_assets(Assets *assets) {
     ImagePool *pool = assets->pool;
@@ -856,6 +872,7 @@ static void audio_files(const Options *o, const DataWin *dw) {
     free(sounds_path);
     free(directory);
 }
+#if BSPP_ENABLE_PARALLEL
 typedef struct {
     const Options *options;
     const DataWin *dw;
@@ -865,6 +882,7 @@ static void *audio_worker(void *context) {
     audio_files(task->options, task->dw);
     return NULL;
 }
+#endif
 static void flush_ps3_images(ImagePool *pool, ClutImage *images, FILE *storage) {
     convert_image_jobs(pool);
     for (size_t i = 0; i < pool->pending; ++i) {
@@ -993,7 +1011,9 @@ void process(const Options *o) {
     DataWin dw = load_datawin(o->input, false, o->ps3);
     mkdirs(o->output);
     Image *pages = allocate(dw.texture_count, sizeof *pages);
-    bool parallel = !o->ps3 && !o->no_parallel;
+    bool parallel = false;
+#if BSPP_ENABLE_PARALLEL
+    parallel = !o->ps3 && !o->no_parallel;
     pthread_t audio_thread;
     AudioTask audio_task = {o, &dw};
     if (parallel) {
@@ -1002,6 +1022,7 @@ void process(const Options *o) {
         if (error)
             fail("cannot start audio worker: %s", strerror(error));
     }
+#endif
     if (o->ps3)
         ps3(o, &dw, pages);
     else {
@@ -1009,11 +1030,13 @@ void process(const Options *o) {
         if (!parallel)
             audio_files(o, &dw);
     }
+#if BSPP_ENABLE_PARALLEL
     if (parallel) {
         int error = pthread_join(audio_thread, NULL);
         if (error)
             fail("cannot join audio worker: %s", strerror(error));
     }
+#endif
     for (size_t i = 0; i < dw.texture_count; ++i)
         free_image(&pages[i]);
     free(pages);

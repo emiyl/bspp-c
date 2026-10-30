@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef BSPP_ENABLE_PARALLEL
+#define BSPP_ENABLE_PARALLEL 0
+#endif
+
 typedef struct {
     const char *input, *output, *debug;
     bool ps3;
