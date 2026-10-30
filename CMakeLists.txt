@@ -19,6 +19,11 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(PCRE2 REQUIRED IMPORTED_TARGET libpcre2-8)
 
 option(ENABLE_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
+option(ENABLE_VITA "Enable Vita PVRTC2 output using Basis Universal (requires C++17)" OFF)
+if(ENABLE_VITA)
+  enable_language(CXX)
+  find_package(Threads REQUIRED)
+endif()
 
 add_subdirectory(lib)
 add_subdirectory(cli)

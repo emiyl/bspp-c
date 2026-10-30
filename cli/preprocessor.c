@@ -9,7 +9,7 @@ static void help(void) {
     puts("Usage: butterscotch-preprocessor [<options>] <datawinpath>\n"
          "\nOptions:\n"
          "  -o, --output=<path>     Output directory (default: output)\n"
-         "  --target=(ps2|ps3)      Output platform (default: ps2)\n"
+         "  --target=(ps2|ps3|vita) Output platform (default: ps2; Vita requires ENABLE_VITA)\n"
          "  --atlas-size=<pixels>   Square atlas dimensions (default: 512; "
          "PS2)\n"
          "  --force-4bpp=<regex>    Full internal image-name PCRE2 match; "
@@ -79,9 +79,10 @@ int main(int argc, char **argv) {
                     fail("parallel support was disabled at build time (ENABLE_PARALLEL=OFF)");
                 o.no_parallel = !strcmp(value, "false");
             } else if (target) {
-                if (strcmp(value, "ps2") && strcmp(value, "ps3"))
-                    fail("target must be ps2 or ps3");
+                if (strcmp(value, "ps2") && strcmp(value, "ps3") && strcmp(value, "vita"))
+                    fail("target must be ps2, ps3 or vita");
                 o.ps3 = !strcmp(value, "ps3");
+                o.vita = !strcmp(value, "vita");
             } else if (atlas) {
                 errno = 0;
                 char *end;

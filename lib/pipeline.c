@@ -983,17 +983,21 @@ static void ps3(const Options *o, const DataWin *dw, Image *pages, WorkerPool *w
     free(groups.items);
 }
 void process(const Options *o) {
+    if (o->ps3 && o->vita)
+        fail("PS3 and Vita targets are mutually exclusive");
+    if (o->vita && !BSPP_ENABLE_VITA)
+        fail("Vita support was disabled at build time (configure with -DENABLE_VITA=ON)");
     struct timespec start = {0};
     if (clock_gettime(CLOCK_MONOTONIC, &start))
         start = (struct timespec){0};
     bspp_verbose = o->verbose;
-    DataWin dw = load_datawin(o->input, false, o->ps3);
+    DataWin dw = load_datawin(o->input, false, o->ps3 || o->vita);
     mkdirs(o->output);
     Image *pages = allocate(dw.texture_count, sizeof *pages);
     WorkerPool *workers = worker_pool_create(!o->no_parallel);
     bool parallel = false;
 #if BSPP_ENABLE_PARALLEL
-    parallel = !o->ps3 && workers;
+    parallel = !o->ps3 && !o->vita && workers;
     pthread_t audio_thread;
     AudioTask audio_task = {o, &dw, workers};
     if (parallel) {
@@ -1003,7 +1007,9 @@ void process(const Options *o) {
             fail("cannot start audio worker: %s", strerror(error));
     }
 #endif
-    if (o->ps3)
+    if (o->vita)
+        process_vita(o, &dw, workers);
+    else if (o->ps3)
         ps3(o, &dw, pages, workers);
     else {
         ps2(o, &dw, pages, workers);

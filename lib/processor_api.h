@@ -9,6 +9,10 @@
 #define BSPP_ENABLE_PARALLEL 0
 #endif
 
+#ifndef BSPP_ENABLE_VITA
+#define BSPP_ENABLE_VITA 0
+#endif
+
 typedef struct {
     const char *input, *output, *debug;
     bool ps3;
@@ -17,6 +21,7 @@ typedef struct {
     char **patterns;
     size_t pattern_count;
     bool no_parallel;
+    bool vita;
 } Options;
 
 void process(const Options *options);

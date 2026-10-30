@@ -80,14 +80,16 @@ jobs:
           mkdir -p dist
           cp build/cli/bspp dist/bspp-${{ matrix.name }}
           cp build/lib/libbspp.a dist/libbspp-${{ matrix.name }}.a
+          cp build/lib/libbspp-basis.a dist/libbspp-basis-${{ matrix.name }}.a
+          mkdir -p dist/BasisUniversal
+          cp build/_deps/basis_universal-src/LICENSE dist/BasisUniversal/
+          cp -R build/_deps/basis_universal-src/LICENSES dist/BasisUniversal/
           chmod +x dist/bspp-${{ matrix.name }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: bspp-${{ matrix.name }}
-          path: |
-            dist/bspp-${{ matrix.name }}
-            dist/libbspp-${{ matrix.name }}.a
+          path: dist/
           if-no-files-found: error
           retention-days: 7

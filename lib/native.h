@@ -159,5 +159,6 @@ int resolve_tpag(const DataWin *dw, uint32_t offset);
 Image extract_tpag(const Tpag *tpag, const Image *pages, size_t page_count);
 void process_audio(const DataWin *dw, const char *input_directory,
                    Buffer *sound_bank, FILE *sounds, WorkerPool *workers);
+void process_vita(const Options *options, const DataWin *dw, WorkerPool *workers);
 
 #endif
