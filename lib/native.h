@@ -39,6 +39,19 @@ int32_t i32(Slice s, size_t at);
 float f32(Slice s, size_t at);
 Slice section(Slice s, size_t at, size_t size);
 
+typedef struct WorkerPool WorkerPool;
+typedef struct Work {
+    void (*run)(void *);
+    void *context;
+    struct Work *next;
+    bool done, submitted;
+} Work;
+WorkerPool *worker_pool_create(bool parallel);
+size_t worker_pool_window(const WorkerPool *pool);
+void worker_submit(WorkerPool *pool, Work *work, void (*run)(void *), void *context);
+void worker_wait(WorkerPool *pool, Work *work);
+void worker_pool_destroy(WorkerPool *pool);
+
 typedef struct {
     int width, height;
     uint32_t *pixels;
@@ -140,6 +153,6 @@ bool version_at_least(const DataWin *dw, int major, int minor, int release,
 int resolve_tpag(const DataWin *dw, uint32_t offset);
 Image extract_tpag(const Tpag *tpag, const Image *pages, size_t page_count);
 void process_audio(const DataWin *dw, const char *input_directory,
-                   Buffer *sound_bank, FILE *sounds, bool parallel);
+                   Buffer *sound_bank, FILE *sounds, WorkerPool *workers);
 
 #endif

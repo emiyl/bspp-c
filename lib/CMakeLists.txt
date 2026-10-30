@@ -1,5 +1,6 @@
 add_library(bspp STATIC
     io.c
+    workers.c
     datawin.c
     image.c
     audio.c
