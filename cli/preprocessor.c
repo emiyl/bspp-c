@@ -15,8 +15,8 @@ static void help(void) {
          "  --force-4bpp=<regex>    Full internal image-name PCRE2 match; "
          "repeatable (PS2)\n"
          "  --debug-output=<path>   Extract debug PNGs (PS2)\n"
-         "  --parallel=(true|false) Process images and audio concurrently "
-         "(default: true; PS2)\n"
+         "  --parallel=(true|false) Enable image/audio workers and PS2 stage overlap "
+         "(default: true)\n"
          "  -v, --verbose           Show processing progress and output paths\n"
          "  -h, --help              Show help\n"
          "\nImage names include spr/, bg/, font/, or tile/ prefixes.");

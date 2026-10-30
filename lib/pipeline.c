@@ -40,11 +40,21 @@ typedef struct {
     int tpag, crop_x, crop_y, crop_w, crop_h;
     size_t order;
 } Asset;
+enum { IMAGE_WORKERS = 4 };
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t work, done;
+    pthread_t threads[IMAGE_WORKERS];
+    size_t worker_count, count, next, finished, pending;
+    bool stopping;
+    Asset jobs[IMAGE_WORKERS];
+    const Options *options;
+    pcre2_code **patterns;
+} ImagePool;
 typedef struct {
     Asset *items;
     size_t count;
-    const Options *options;
-    pcre2_code **patterns;
+    ImagePool *pool;
     FILE *storage;
 } Assets;
 typedef struct {
@@ -163,37 +173,117 @@ static void debug_tpag(const Options *o, const char *dir, const char *name,
     free_image(&out);
 }
 static void prepare_asset(Asset *a, int atlas_size);
-static void add_asset(Assets *assets, char *name, char *key, Image image,
-                      int tpag, size_t order) {
-    Asset asset = {.name = name,
-                   .key = key,
-                   .image = image,
-                   .tpag = tpag,
-                   .crop_w = image.width,
-                   .crop_h = image.height,
-                   .order = order};
-    prepare_asset(&asset, assets->options->atlas_size);
+static void convert_asset(Asset *asset, const ImagePool *pool) {
+    if (!pool->options->ps3)
+        prepare_asset(asset, pool->options->atlas_size);
     bool force = false;
-    for (size_t j = 0; j < assets->options->pattern_count; ++j) {
+    for (size_t j = 0; !pool->options->ps3 && j < pool->options->pattern_count; ++j) {
         pcre2_match_data *match =
-            pcre2_match_data_create_from_pattern(assets->patterns[j], NULL);
+            pcre2_match_data_create_from_pattern(pool->patterns[j], NULL);
         if (!match)
             fail("cannot allocate regex match data");
         int rc =
-            pcre2_match(assets->patterns[j], (PCRE2_SPTR)name, strlen(name), 0,
+            pcre2_match(pool->patterns[j], (PCRE2_SPTR)asset->name, strlen(asset->name), 0,
                         PCRE2_ANCHORED | PCRE2_ENDANCHORED, match, NULL);
         pcre2_match_data_free(match);
         if (rc >= 0)
             force = true;
         else if (rc != PCRE2_ERROR_NOMATCH)
-            fail("regex matching failed (%d) for '%s'", rc, name);
+            fail("regex matching failed (%d) for '%s'", rc, asset->name);
     }
-    asset.clut = make_clut(name, &asset.image, force);
-    free_image(&asset.image);
-    spool_clut(&asset.clut, assets->storage);
-    assets->items =
-        resize_array(assets->items, assets->count + 1, sizeof *assets->items);
-    assets->items[assets->count++] = asset;
+    asset->clut = make_clut(asset->name, &asset->image, force);
+    if (pool->options->ps3)
+        asset->clut.bpp = 8;
+    free_image(&asset->image);
+}
+static void image_thread_check(int error, const char *operation) {
+    if (error)
+        fail("image worker %s: %s", operation, strerror(error));
+}
+static void *image_pool_worker(void *context) {
+    ImagePool *pool = context;
+    image_thread_check(pthread_mutex_lock(&pool->mutex), "lock");
+    for (;;) {
+        while (pool->next == pool->count && !pool->stopping)
+            image_thread_check(pthread_cond_wait(&pool->work, &pool->mutex),
+                               "wait for work");
+        if (pool->stopping)
+            break;
+        Asset *asset = &pool->jobs[pool->next++];
+        image_thread_check(pthread_mutex_unlock(&pool->mutex), "unlock");
+        convert_asset(asset, pool);
+        image_thread_check(pthread_mutex_lock(&pool->mutex), "lock");
+        if (++pool->finished == pool->count)
+            image_thread_check(pthread_cond_signal(&pool->done),
+                               "signal completion");
+    }
+    image_thread_check(pthread_mutex_unlock(&pool->mutex), "unlock");
+    return NULL;
+}
+static void start_image_pool(ImagePool *pool) {
+    if (pool->options->no_parallel)
+        return;
+    image_thread_check(pthread_mutex_init(&pool->mutex, NULL), "initialize mutex");
+    image_thread_check(pthread_cond_init(&pool->work, NULL), "initialize work condition");
+    image_thread_check(pthread_cond_init(&pool->done, NULL), "initialize completion condition");
+    for (size_t i = 0; i < IMAGE_WORKERS; ++i) {
+        image_thread_check(pthread_create(&pool->threads[i], NULL, image_pool_worker, pool),
+                           "start");
+        ++pool->worker_count;
+    }
+}
+static void convert_image_jobs(ImagePool *pool) {
+    if (!pool->pending)
+        return;
+    if (!pool->worker_count) {
+        for (size_t i = 0; i < pool->pending; ++i)
+            convert_asset(&pool->jobs[i], pool);
+        return;
+    }
+    image_thread_check(pthread_mutex_lock(&pool->mutex), "lock");
+    pool->count = pool->pending;
+    pool->next = pool->finished = 0;
+    image_thread_check(pthread_cond_broadcast(&pool->work), "dispatch batch");
+    while (pool->finished < pool->count)
+        image_thread_check(pthread_cond_wait(&pool->done, &pool->mutex),
+                           "wait for completion");
+    image_thread_check(pthread_mutex_unlock(&pool->mutex), "unlock");
+}
+static void stop_image_pool(ImagePool *pool) {
+    if (!pool->worker_count)
+        return;
+    image_thread_check(pthread_mutex_lock(&pool->mutex), "lock");
+    pool->stopping = true;
+    image_thread_check(pthread_cond_broadcast(&pool->work), "stop workers");
+    image_thread_check(pthread_mutex_unlock(&pool->mutex), "unlock");
+    for (size_t i = 0; i < pool->worker_count; ++i)
+        image_thread_check(pthread_join(pool->threads[i], NULL), "join");
+    image_thread_check(pthread_cond_destroy(&pool->work), "destroy work condition");
+    image_thread_check(pthread_cond_destroy(&pool->done), "destroy completion condition");
+    image_thread_check(pthread_mutex_destroy(&pool->mutex), "destroy mutex");
+}
+static void flush_assets(Assets *assets) {
+    ImagePool *pool = assets->pool;
+    convert_image_jobs(pool);
+    if (pool->pending) {
+        assets->items = resize_array(assets->items, assets->count + pool->pending,
+                                    sizeof *assets->items);
+        for (size_t i = 0; i < pool->pending; ++i) {
+            spool_clut(&pool->jobs[i].clut, assets->storage);
+            assets->items[assets->count++] = pool->jobs[i];
+        }
+        pool->pending = 0;
+    }
+}
+static void add_asset(Assets *assets, char *name, char *key, Image image,
+                      int tpag, size_t order) {
+    ImagePool *pool = assets->pool;
+    pool->jobs[pool->pending++] = (Asset){
+        .name = name, .key = key, .image = image, .tpag = tpag,
+        .crop_w = image.width, .crop_h = image.height, .order = order
+    };
+    if (pool->pending == (pool->worker_count ? pool->worker_count : 1))
+        flush_assets(assets);
 }
 static int compare_asset_order(const void *a, const void *b) {
     size_t left = ((const Asset *)a)->order, right = ((const Asset *)b)->order;
@@ -346,7 +436,9 @@ static void collect_page_assets(Assets *a, const Options *o, const DataWin *dw,
 
 static Assets collect(const Options *o, const DataWin *dw, Image *pages,
                       pcre2_code **patterns, FILE *storage) {
-    Assets a = {.options = o, .patterns = patterns, .storage = storage};
+    ImagePool pool = {.options = o, .patterns = patterns};
+    start_image_pool(&pool);
+    Assets a = {.pool = &pool, .storage = storage};
     if (o->debug) {
         const char *dirs[] = {"sprites", "backgrounds", "fonts", "tiles",
                               "atlas_debug"};
@@ -389,6 +481,9 @@ static Assets collect(const Options *o, const DataWin *dw, Image *pages,
         collect_page_assets(&a, o, dw, pages, i);
         free_image(&pages[i]);
     }
+    flush_assets(&a);
+    stop_image_pool(&pool);
+    a.pool = NULL;
     free(used);
     /* Palette merging and packing use source order to break ties, not page
      * order. */
@@ -770,6 +865,16 @@ static void *audio_worker(void *context) {
     audio_files(task->options, task->dw);
     return NULL;
 }
+static void flush_ps3_images(ImagePool *pool, ClutImage *images, FILE *storage) {
+    convert_image_jobs(pool);
+    for (size_t i = 0; i < pool->pending; ++i) {
+        Asset *asset = &pool->jobs[i];
+        spool_clut(&asset->clut, storage);
+        images[asset->order] = asset->clut;
+        free(asset->name);
+    }
+    pool->pending = 0;
+}
 static void ps3(const Options *o, const DataWin *dw, Image *pages) {
     FILE *storage = tmpfile();
     if (!storage)
@@ -785,6 +890,8 @@ static void ps3(const Options *o, const DataWin *dw, Image *pages) {
             continue;
         mapping[i] = (int)count++;
     }
+    ImagePool pool = {.options = o};
+    start_image_pool(&pool);
     for (size_t page = 0; page < dw->texture_count; ++page) {
         if (!dw->textures[page].size)
             continue;
@@ -793,17 +900,19 @@ static void ps3(const Options *o, const DataWin *dw, Image *pages) {
         for (size_t i = 0; i < dw->tpag_count; ++i) {
             if (mapping[i] < 0 || dw->tpags[i].page != (int)page)
                 continue;
-            Image img = extract_tpag(&dw->tpags[i], pages, dw->texture_count);
-            char *name = format_string("tpag_%zu", i);
-            images[mapping[i]] = make_clut(name, &img, false);
-            images[mapping[i]].bpp = 8;
-            spool_clut(&images[mapping[i]], storage);
-            free(name);
-            free_image(&img);
+            pool.jobs[pool.pending++] = (Asset){
+                .name = format_string("tpag_%zu", i),
+                .image = extract_tpag(&dw->tpags[i], pages, dw->texture_count),
+                .order = (size_t)mapping[i]
+            };
+            if (pool.pending == (pool.worker_count ? pool.worker_count : 1))
+                flush_ps3_images(&pool, images, storage);
         }
         free(pages[page].pixels);
         pages[page].pixels = NULL;
     }
+    flush_ps3_images(&pool, images, storage);
+    stop_image_pool(&pool);
     Groups groups = merge_cluts(images, count);
     Buffer out = {0};
     put8(&out, 0);
