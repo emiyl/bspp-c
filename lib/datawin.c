@@ -22,6 +22,13 @@ static Table table(Slice s, size_t at) {
 
 static size_t pointer(Table t, size_t i) { return u32(t.data, i * 4); }
 
+static int compare_tpag_lookup(const void *a, const void *b) {
+    const TpagLookup *left = a, *right = b;
+    if (left->offset != right->offset)
+        return left->offset < right->offset ? -1 : 1;
+    return (left->index > right->index) - (left->index < right->index);
+}
+
 static char *string_at(Slice s, size_t at) {
     uint32_t ptr = u32(s, at);
     if (!ptr)
@@ -278,8 +285,10 @@ DataWin parse_datawin(Buffer source, bool audio_only, bool ps3) {
                     fail("duplicate TPAG chunk");
                 dw.tpag_count = t.count;
                 dw.tpags = allocate(t.count, sizeof *dw.tpags);
+                dw.tpag_lookup = allocate(t.count, sizeof *dw.tpag_lookup);
                 for (size_t i = 0; i < t.count; ++i) {
                     size_t q = pointer(t, i);
+                    dw.tpag_lookup[i] = (TpagLookup){(uint32_t)q, (int)i};
                     dw.tpags[i] =
                         (Tpag){(uint32_t)q,    u16(s, q),
                                u16(s, q + 2),  u16(s, q + 4),
@@ -288,6 +297,8 @@ DataWin parse_datawin(Buffer source, bool audio_only, bool ps3) {
                                u16(s, q + 14), u16(s, q + 16),
                                u16(s, q + 18), (int16_t)u16(s, q + 20)};
                 }
+                qsort(dw.tpag_lookup, t.count, sizeof *dw.tpag_lookup,
+                      compare_tpag_lookup);
             } else if (tx) {
                 if (dw.textures)
                     fail("duplicate TXTR chunk");
@@ -358,9 +369,16 @@ DataWin parse_datawin(Buffer source, bool audio_only, bool ps3) {
 }
 
 int resolve_tpag(const DataWin *dw, uint32_t offset) {
-    for (size_t i = 0; i < dw->tpag_count; ++i)
-        if (dw->tpags[i].offset == offset)
-            return (int)i;
+    size_t low = 0, high = dw->tpag_count;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        if (dw->tpag_lookup[mid].offset < offset)
+            low = mid + 1;
+        else
+            high = mid;
+    }
+    if (low < dw->tpag_count && dw->tpag_lookup[low].offset == offset)
+        return dw->tpag_lookup[low].index;
     return -1;
 }
 
@@ -405,6 +423,7 @@ void free_datawin(DataWin *dw) {
     free(dw->fonts);
     free(dw->sounds);
     free(dw->tpags);
+    free(dw->tpag_lookup);
     free(dw->textures);
     free(dw->tiles);
     free(dw->audio);

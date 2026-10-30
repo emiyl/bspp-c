@@ -64,6 +64,18 @@ typedef struct {
 typedef struct {
     int atlas, x, y;
 } Location;
+typedef enum {
+    REF_SPRITE, REF_BACKGROUND, REF_FONT, REF_TILE
+} AssetKind;
+typedef struct {
+    AssetKind kind;
+    int tpag, page;
+    size_t definition, frame, order;
+} AssetReference;
+typedef struct {
+    AssetReference *items;
+    size_t count;
+} AssetReferences;
 
 static bool starts(const char *s, const char *prefix) {
     return !strncmp(s, prefix, strlen(prefix));
@@ -324,75 +336,120 @@ static char *tile_name(const DataWin *dw, const Tile *t, bool key) {
     free(fallback);
     return out;
 }
-static void collect_page_assets(Assets *a, const Options *o, const DataWin *dw,
-                                Image *pages, size_t page_index) {
-    if (page_index >= dw->texture_count)
+static void add_reference(AssetReferences *refs, const DataWin *dw,
+                          AssetReference ref) {
+    if (ref.tpag < 0)
         return;
+    ref.page = dw->tpags[ref.tpag].page;
+    if (ref.page < 0 || (size_t)ref.page >= dw->texture_count)
+        return;
+    if (refs->count == SIZE_MAX)
+        fail("excessive asset reference count");
+    refs->items =
+        resize_array(refs->items, refs->count + 1, sizeof *refs->items);
+    refs->items[refs->count++] = ref;
+}
+
+static int compare_reference_page(const void *a, const void *b) {
+    const AssetReference *left = a, *right = b;
+    if (left->page != right->page)
+        return left->page < right->page ? -1 : 1;
+    return (left->order > right->order) - (left->order < right->order);
+}
+
+static AssetReferences collect_references(const DataWin *dw) {
+    AssetReferences refs = {0};
+    size_t order = 0;
+    for (size_t i = 0; i < dw->sprite_count; ++i) {
+        const Sprite *sp = &dw->sprites[i];
+        for (size_t j = 0; j < sp->count; ++j, ++order)
+            add_reference(&refs, dw,
+                          (AssetReference){.kind = REF_SPRITE,
+                                           .tpag = resolve_tpag(dw, sp->textures[j]),
+                                           .definition = i, .frame = j,
+                                           .order = order});
+    }
+    for (int which = 0; which < 2; ++which) {
+        const NamedTexture *items = which ? dw->fonts : dw->backgrounds;
+        size_t count = which ? dw->font_count : dw->background_count;
+        for (size_t i = 0; i < count; ++i, ++order)
+            add_reference(&refs, dw,
+                          (AssetReference){.kind = which ? REF_FONT : REF_BACKGROUND,
+                                           .tpag = resolve_tpag(dw, items[i].texture),
+                                           .definition = i, .order = order});
+    }
+    for (size_t i = 0; i < dw->tile_count; ++i, ++order)
+        add_reference(&refs, dw,
+                      (AssetReference){.kind = REF_TILE,
+                                       .tpag = tile_tpag(dw, &dw->tiles[i]),
+                                       .definition = i, .order = order});
+    if (refs.count > 1)
+        qsort(refs.items, refs.count, sizeof *refs.items, compare_reference_page);
+    return refs;
+}
+
+static void collect_page_assets(Assets *a, const Options *o, const DataWin *dw,
+                                Image *pages, size_t page_index,
+                                const AssetReference *refs, size_t count) {
     if (!pages[page_index].pixels && dw->textures[page_index].size)
         pages[page_index] = decode_image(dw->textures[page_index],
                                          version_at_least(dw, 2022, 5, 0, 0));
     if (!pages[page_index].pixels)
         return;
-    size_t order = 0;
-    for (size_t i = 0; i < dw->sprite_count; ++i) {
-        const Sprite *sp = &dw->sprites[i];
-        char *owned;
-        const char *n = name_or(sp->name, "sprite_", i, &owned);
-        for (size_t j = 0; j < sp->count; ++j, ++order) {
-            int index = resolve_tpag(dw, sp->textures[j]);
-            if (index < 0 || dw->tpags[index].page != (int)page_index)
-                continue;
+    for (size_t i = 0; i < count; ++i) {
+        const AssetReference *ref = &refs[i];
+        int index = ref->tpag;
+        if (ref->kind == REF_SPRITE) {
+            const Sprite *sp = &dw->sprites[ref->definition];
+            char *owned;
+            const char *n =
+                name_or(sp->name, "sprite_", ref->definition, &owned);
             Image img =
                 extract_tpag(&dw->tpags[index], pages, dw->texture_count);
-            char *name =
-                sp->count > 1 ? format_string("%s_%zu", n, j) : copy_string(n);
+            char *name = sp->count > 1
+                             ? format_string("%s_%zu", n, ref->frame)
+                             : copy_string(n);
             debug_tpag(o, "sprites", name, &dw->tpags[index], pages,
                        dw->texture_count);
             char *full = format_string("spr/%s", name);
-            add_asset(a, full, sprite_key(n), img, index, order);
+            add_asset(a, full, sprite_key(n), img, index, ref->order);
             free(name);
-        }
-        free(owned);
-    }
-    for (int which = 0; which < 2; ++which) {
-        const NamedTexture *items = which ? dw->fonts : dw->backgrounds;
-        size_t count = which ? dw->font_count : dw->background_count;
-        for (size_t i = 0; i < count; ++i, ++order) {
-            int index = resolve_tpag(dw, items[i].texture);
-            if (index < 0 || dw->tpags[index].page != (int)page_index)
-                continue;
+            free(owned);
+        } else if (ref->kind == REF_BACKGROUND || ref->kind == REF_FONT) {
+            bool font = ref->kind == REF_FONT;
+            const NamedTexture *item =
+                font ? &dw->fonts[ref->definition]
+                     : &dw->backgrounds[ref->definition];
             char *owned;
-            const char *n =
-                name_or(items[i].name, which ? "font_" : "bg_", i, &owned);
+            const char *n = name_or(item->name, font ? "font_" : "bg_",
+                                    ref->definition, &owned);
             Image img =
                 extract_tpag(&dw->tpags[index], pages, dw->texture_count);
-            debug_tpag(o, which ? "fonts" : "backgrounds", n, &dw->tpags[index],
+            debug_tpag(o, font ? "fonts" : "backgrounds", n, &dw->tpags[index],
                        pages, dw->texture_count);
-            char *name = format_string("%s/%s", which ? "font" : "bg", n);
-            add_asset(a, name, copy_string(name), img, index, order);
+            char *name = format_string("%s/%s", font ? "font" : "bg", n);
+            add_asset(a, name, copy_string(name), img, index, ref->order);
             free(owned);
-        }
-    }
-    for (size_t i = 0; i < dw->tile_count; ++i, ++order) {
-        const Tile *t = &dw->tiles[i];
-        int index = tile_tpag(dw, t);
-        if (index < 0 || t->x < 0 || t->y < 0 || t->width <= 0 ||
-            t->height <= 0 || dw->tpags[index].page != (int)page_index)
-            continue;
-        Image source =
-            extract_tpag(&dw->tpags[index], pages, dw->texture_count);
-        if (t->x >= source.width || t->y >= source.height) {
+        } else {
+            const Tile *t = &dw->tiles[ref->definition];
+            if (t->x < 0 || t->y < 0 || t->width <= 0 || t->height <= 0)
+                continue;
+            Image source =
+                extract_tpag(&dw->tpags[index], pages, dw->texture_count);
+            if (t->x >= source.width || t->y >= source.height) {
+                free_image(&source);
+                continue;
+            }
+            int w = t->width < source.width - t->x
+                        ? t->width : source.width - t->x;
+            int h = t->height < source.height - t->y
+                        ? t->height : source.height - t->y;
+            Image img = subimage(&source, t->x, t->y, w, h);
             free_image(&source);
-            continue;
+            char *name = tile_name(dw, t, false);
+            debug_png(o, "tiles", name + 5, &img);
+            add_asset(a, name, tile_name(dw, t, true), img, -1, ref->order);
         }
-        int w = t->width < source.width - t->x ? t->width : source.width - t->x;
-        int h =
-            t->height < source.height - t->y ? t->height : source.height - t->y;
-        Image img = subimage(&source, t->x, t->y, w, h);
-        free_image(&source);
-        char *name = tile_name(dw, t, false);
-        debug_png(o, "tiles", name + 5, &img);
-        add_asset(a, name, tile_name(dw, t, true), img, -1, order);
     }
 }
 
@@ -410,43 +467,21 @@ static Assets collect(const Options *o, const DataWin *dw, Image *pages,
             free(path);
         }
     }
-    bool *used = allocate(dw->texture_count, sizeof *used);
-    for (size_t i = 0; i < dw->sprite_count; ++i) {
-        const Sprite *sp = &dw->sprites[i];
-        for (size_t j = 0; j < sp->count; ++j) {
-            int index = resolve_tpag(dw, sp->textures[j]);
-            if (index >= 0 && dw->tpags[index].page >= 0 &&
-                (size_t)dw->tpags[index].page < dw->texture_count)
-                used[(size_t)dw->tpags[index].page] = true;
-        }
+    AssetReferences refs = collect_references(dw);
+    for (size_t first = 0; first < refs.count;) {
+        int page = refs.items[first].page;
+        size_t last = first + 1;
+        while (last < refs.count && refs.items[last].page == page)
+            ++last;
+        collect_page_assets(&a, o, dw, pages, (size_t)page,
+                            refs.items + first, last - first);
+        free_image(&pages[page]);
+        first = last;
     }
-    for (int which = 0; which < 2; ++which) {
-        const NamedTexture *items = which ? dw->fonts : dw->backgrounds;
-        size_t count = which ? dw->font_count : dw->background_count;
-        for (size_t i = 0; i < count; ++i) {
-            int index = resolve_tpag(dw, items[i].texture);
-            if (index >= 0 && dw->tpags[index].page >= 0 &&
-                (size_t)dw->tpags[index].page < dw->texture_count)
-                used[(size_t)dw->tpags[index].page] = true;
-        }
-    }
-    for (size_t i = 0; i < dw->tile_count; ++i) {
-        const Tile *t = &dw->tiles[i];
-        int index = tile_tpag(dw, t);
-        if (index >= 0 && dw->tpags[index].page >= 0 &&
-            (size_t)dw->tpags[index].page < dw->texture_count)
-            used[(size_t)dw->tpags[index].page] = true;
-    }
-    for (size_t i = 0; i < dw->texture_count; ++i) {
-        if (!used[i])
-            continue;
-        collect_page_assets(&a, o, dw, pages, i);
-        free_image(&pages[i]);
-    }
+    free(refs.items);
     flush_assets(&a);
     free(queue.jobs);
     a.queue = NULL;
-    free(used);
     /* Palette merging and packing use source order to break ties, not page
      * order. */
     if (a.count > 1)

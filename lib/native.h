@@ -106,6 +106,10 @@ typedef struct {
     int sx, sy, sw, sh, tx, ty, tw, th, bw, bh, page;
 } Tpag;
 typedef struct {
+    uint32_t offset;
+    int index;
+} TpagLookup;
+typedef struct {
     char *name;
     uint32_t *textures;
     size_t count;
@@ -129,6 +133,7 @@ typedef struct {
     bool source_mapped;
     int version[4], bytecode;
     Tpag *tpags;
+    TpagLookup *tpag_lookup;
     size_t tpag_count;
     Slice *textures;
     size_t texture_count;
